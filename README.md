@@ -4,7 +4,7 @@ A local-first, modular Retrieval-Augmented Generation engineering prototype.
 
 ## Current Status
 
-The repository currently implements document ingestion through in-memory vector search. It does **not** yet provide natural-language question answering, retrieval orchestration, or answer generation.
+The repository implements document ingestion, chunking, provider-selectable embedding and generation clients, and in-memory vector search. It does **not** yet implement Retriever orchestration or an end-to-end natural-language question-answering pipeline.
 
 ### Completed
 
@@ -12,27 +12,26 @@ The repository currently implements document ingestion through in-memory vector 
 - Environment-based configuration with delayed Gemini API-key validation
 - Recursive TXT and Markdown ingestion
 - Configurable JSON and JSONL structured extraction
-- UTF-8 and UTF-8 BOM handling
-- Deterministic character-based chunking with overlap and metadata preservation
-- Provider-neutral embedding abstraction
-- Google Gen AI embedding adapter with batch processing
-- Empty-vector and vector-dimension validation
+- Deterministic character-based chunking with metadata preservation
+- Provider-neutral `EmbeddingClient` and `GenerationClient` interfaces
+- Gemini embedding and generation adapters
+- Ollama embedding and non-streaming generation adapters
+- Independent embedding and generation provider selection
+- Shared empty-vector, finite-number, dimension, and generated-text validation
 - In-memory FAISS `IndexFlatL2` build and search
-- Offline tests using fake embedding clients and vectors
-- 58 offline tests passing
+- Fully offline tests with fake SDK clients and HTTP transports
 
 ### Not Yet Implemented
 
 - PDF ingestion
-- Ollama embedding or generation providers
-- Retriever orchestration and query embedding flow
-- Answer generation
+- Retriever orchestration and query-to-index search flow
 - Complete RAG pipeline
-- FAISS persistence and index lifecycle management
+- FAISS persistence, manifest, and index lifecycle management
 - CLI application
 - Source citations
 - Retrieval and answer-quality evaluation
 - API or UI
+- Live Gemini and Ollama integration tests
 
 ## Current Data Flow
 
@@ -43,27 +42,49 @@ LoadedDocument
         ↓
 DocumentChunk
         ↓
+Selected Embedding Provider (Gemini or Ollama)
+        ↓
 EmbeddedChunk
         ↓
 In-memory FAISS
 ```
 
-The implemented flow stops before query retrieval and generation. The project cannot yet answer a natural-language question end to end.
+Generation clients can accept a prompt and return text, but they are not connected to retrieval. The project therefore cannot yet answer a natural-language question end to end.
 
-## Repository Layout
+## Provider Architecture
 
 ```text
-enterprise-rag-prototype/
-├── data/
-│   ├── documents/          # Local source documents; ignored except .gitkeep
-│   └── samples/            # Public, non-sensitive ingestion samples
-├── notebooks/              # Preserved Colab proof of concept
-├── src/enterprise_rag/     # Local Python package
-├── tests/                  # Offline automated tests and fixtures
-├── .env.example            # Safe environment-variable template
-├── pyproject.toml          # Package metadata and dependency source
-└── requirements.txt        # Editable development install via pyproject.toml
+embeddings.py              generation.py
+EmbeddingClient            GenerationClient
+       ↓                           ↓
+factory.create_*_client(Settings)
+       ↓                           ↓
+Gemini adapter             Ollama adapter
 ```
+
+Configure providers independently in `.env`:
+
+```dotenv
+EMBEDDING_PROVIDER=gemini
+GENERATION_PROVIDER=ollama
+```
+
+Supported combinations:
+
+- Gemini embedding + Gemini generation
+- Ollama embedding + Ollama generation
+- Ollama embedding + Gemini generation
+- Gemini embedding + Ollama generation
+
+Only the selected provider is called for an operation. The application does not automatically call both providers and never silently falls back to another provider.
+
+### Index Compatibility Rule
+
+Document embeddings used to build a FAISS index and query embeddings used to search it must use the same embedding provider, model, and vector space. Generation is independent and can use either provider. An index manifest is not implemented yet, so this compatibility must currently be managed by the user.
+
+### Ollama Setup
+
+Ollama must be installed, started, and supplied with the configured models by the user. This project does not download models or start the Ollama service. The adapters use the local HTTP API at `OLLAMA_BASE_URL` and default to `http://localhost:11434`.
 
 ## Local Setup
 
@@ -74,33 +95,23 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-`requirements.txt` installs the editable project with its test dependencies. Runtime and test dependency declarations are maintained in `pyproject.toml`.
-
-A Gemini API key is not required for configuration, document loading, JSON extraction, chunking, FAISS tests, or mocked embedding tests. Before a real Google embedding request, copy `.env.example` to `.env` and replace the placeholder:
-
-```dotenv
-GEMINI_API_KEY=your_real_key_here
-```
-
-Never commit `.env`, private documents, generated indexes, logs, or caches.
+Runtime and test dependencies are declared in `pyproject.toml`; `requirements.txt` performs an editable development install. A Gemini key is checked only immediately before a real Gemini operation. Ollama operations never require a Gemini key.
 
 ## Running Tests
-
-Use a writable temporary directory outside the project when local `.test-tmp` permissions are unreliable:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest --basetemp=<writable-temp-directory> -p no:cacheprovider
 ```
 
-All tests are designed to run offline and do not call the Gemini API.
+Provider tests inject fake SDK clients or HTTP transports. They do not call Gemini, localhost, Ollama, or any external network.
 
 ## Data and Security
 
 - `data/documents/` is local-only except for `.gitkeep`.
-- `data/private/`, generated FAISS files, index directories, and Qdrant storage are ignored.
-- `data/samples/` and `tests/fixtures/` contain public fictional test data and remain trackable.
-- Real embedding requests send chunk text to the configured provider; do not use confidential or personal data without authorization.
+- `data/private/`, generated indexes, logs, and caches are ignored.
+- `data/samples/` and `tests/fixtures/` contain public fictional data.
+- Real embedding requests send chunk text to the selected provider; do not process confidential or personal data without authorization.
 
 ## Original Notebook
 
-The Colab notebook is preserved as historical proof of concept. It is not the source of truth for the modular local implementation.
+The Colab notebook is preserved as historical proof of concept and is not the source of truth for the modular implementation.

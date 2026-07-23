@@ -57,39 +57,21 @@ def make_chunk(index: int, content: str) -> DocumentChunk:
     )
 
 
-def test_missing_api_key_fails_only_when_embedding_runs() -> None:
+def test_injected_client_does_not_require_provider_credentials() -> None:
     settings = make_settings(api_key=None)
     client = FakeEmbeddingClient([[0.1, 0.2]])
 
     assert embed_chunks([], settings, client=client) == ()
-    assert client.calls == []
+    result = embed_chunks([make_chunk(0, "content")], settings, client=client)
 
-    with pytest.raises(ConfigurationError, match="GEMINI_API_KEY"):
-        embed_chunks([make_chunk(0, "content")], settings, client=client)
-
-    assert client.calls == []
+    assert result[0].vector == (0.1, 0.2)
+    assert client.calls == [("test-embedding-model", ("content",))]
 
 
-def test_real_client_factory_validates_key_before_construction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    constructed = False
+def test_compatibility_factory_delegates_without_api_call() -> None:
+    client = create_embedding_client(make_settings(api_key=None))
 
-    def fail_if_constructed(*, api_key: str) -> None:
-        nonlocal constructed
-        constructed = True
-
-    monkeypatch.setattr(
-        embedding_module,
-        "GoogleGenAIEmbeddingClient",
-        fail_if_constructed,
-    )
-
-    with pytest.raises(ConfigurationError, match="GEMINI_API_KEY"):
-        create_embedding_client(make_settings(api_key=None))
-
-    assert constructed is False
-
+    assert type(client).__name__ == "GeminiEmbeddingClient"
 
 def test_multiple_chunks_are_embedded_in_one_batch() -> None:
     chunks = [make_chunk(0, "first"), make_chunk(1, "second")]

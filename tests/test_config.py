@@ -1,4 +1,4 @@
-﻿"""Tests for environment-based configuration loading."""
+"""Tests for environment-based configuration loading."""
 
 import pytest
 
@@ -13,6 +13,13 @@ SETTING_NAMES = (
     "CHUNK_SIZE",
     "CHUNK_OVERLAP",
     "TOP_K",
+    "EMBEDDING_PROVIDER",
+    "GENERATION_PROVIDER",
+    "GEMINI_CHAT_MODEL",
+    "OLLAMA_BASE_URL",
+    "OLLAMA_EMBEDDING_MODEL",
+    "OLLAMA_CHAT_MODEL",
+    "OLLAMA_TIMEOUT_SECONDS",
 )
 
 
