@@ -216,3 +216,44 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Local documents and generated vector indexes
+data/documents/*
+!data/documents/.gitkeep
+data/vector_store/
+vector_store/
+faiss_index/
+*.faiss
+*.pkl
+
+# Local application artifacts
+logs/
+*.log
+
+.local-test-temp/
+
+# Project test and local caches
+.test-tmp/
+.pytest_temp/
+**/__pycache__/
+*.pyc
+.cache/
+cache/
+
+# Private documents and local indexes
+data/private/
+data/indexes/
+*.index
+qdrant_storage/
+indexes/
+index_data/

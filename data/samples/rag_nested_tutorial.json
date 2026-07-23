@@ -1,0 +1,8 @@
+{
+  "title": "RAG Engineering Tutorial",
+  "author": "Example Documentation Team",
+  "sections": [
+    {"heading": "Ingestion", "paragraphs": ["Load curated documents.", "Normalize useful metadata."]},
+    {"heading": "Retrieval", "content": "Retrieve relevant chunks before generation."}
+  ]
+}

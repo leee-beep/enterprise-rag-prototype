@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enterprise-rag-prototype"
+version = "0.1.0"
+description = "A local-first RAG engineering knowledge assistant prototype."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0",
+    "google-genai>=1.0",
+    "faiss-cpu>=1.8",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["enterprise_rag*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

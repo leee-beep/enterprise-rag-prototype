@@ -1,0 +1,2 @@
+{"question":"What is a chunk?","answer":"A chunk is a bounded passage used for retrieval.","category":"rag-basics"}
+{"question":"Why preserve source metadata?","answer":"It supports traceability and citations.","category":"rag-basics"}

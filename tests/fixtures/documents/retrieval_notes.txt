@@ -1,0 +1,5 @@
+﻿Retrieval notes
+
+A retriever accepts a query and returns candidate passages. Ranking quality should be measured with a small, reviewed evaluation set.
+
+For deterministic tests, use fixed documents, explicit top-k values, and stable identifiers. Do not rely on network services in ingestion unit tests.
