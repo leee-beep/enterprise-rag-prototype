@@ -4,7 +4,7 @@ A local-first, modular Retrieval-Augmented Generation engineering prototype.
 
 ## Current Status
 
-The repository implements document ingestion, chunking, provider-selectable embedding and generation clients, and in-memory vector search. It does **not** yet implement Retriever orchestration or an end-to-end natural-language question-answering pipeline.
+The repository implements document ingestion, chunking, provider-selectable embeddings, in-memory vector search, and provider-independent retrieval. It does **not** yet implement an end-to-end natural-language question-answering pipeline.
 
 ### Completed
 
@@ -18,7 +18,9 @@ The repository implements document ingestion, chunking, provider-selectable embe
 - Ollama embedding and non-streaming generation adapters
 - Independent embedding and generation provider selection
 - Shared empty-vector, finite-number, dimension, and generated-text validation
-- In-memory FAISS `IndexFlatL2` build and search
+- In-memory FAISS `IndexFlatL2` build and scored search
+- Provider-independent `Retriever` with Top-K results and normalized metadata
+- Injectable `retrieve` CLI command formatting for score, source, and chunk
 - Fully offline tests with fake SDK clients and HTTP transports
 
 ### Not Yet Implemented
@@ -115,3 +117,17 @@ Provider tests inject fake SDK clients or HTTP transports. They do not call Gemi
 ## Original Notebook
 
 The Colab notebook is preserved as historical proof of concept and is not the source of truth for the modular implementation.
+## Retrieval Score Semantics
+
+Retriever results use `score = 1 / (1 + squared_l2_distance)`. This is a monotonic display/relevance score derived from the raw squared L2 distance returned by FAISS:
+
+- Higher means closer within the current index.
+- It is not cosine similarity, a probability, or an accuracy percentage.
+- It is only meaningful for comparisons within the same embedding provider, model, vector space, and index.
+- Scores must not be compared across models or indexes.
+
+## Retrieve CLI Scope
+
+The `retrieve` subcommand presentation layer accepts a question, calls an already-injected in-memory `Retriever`, and prints Top-K score, source, and chunk text. It does not build or load an index, embed documents, generate an answer, or invoke a pipeline.
+
+The index is currently in-memory only. A new independent process cannot automatically access an index created by an earlier process because persistence and standalone index loading are not implemented. Running the module without an injected Retriever returns a concise configuration error without an internal traceback. A standalone CLI workflow belongs to the later Pipeline/Persistence milestone.

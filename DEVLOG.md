@@ -59,4 +59,19 @@ Generation provider 已可獨立建立並接受 prompt，但尚未連接 Retriev
 - 建立 index 與查詢 index 必須使用相同 embedding provider、model 與向量空間。
 - 尚未實作 index manifest，因此目前需由使用者自行維持相容性。
 - 尚未執行真實 Gemini 或 Ollama integration test。
-- Retriever、完整 Pipeline、citations、CLI、PDF、API/UI 尚未完成。
+- 完整 Pipeline、citations、PDF、API/UI 尚未完成。
+- CLI retrieve 呈現層已完成，但 standalone index loading 尚未完成。
+## Milestone 3：Retriever Foundation
+
+- RetrievalResult
+  - finite relevance score
+  - EmbeddedChunk reference
+  - copied, canonical, read-only metadata
+- QueryEmbeddingClient 最小介面
+- Provider-independent Retriever
+- FAISS `search_with_scores()` 回傳原始 squared L2 distance
+- relevance score：`1 / (1 + squared_l2_distance)`，只適合同模型、同 index 內比較
+- Top-K、排序、空 index、query vector 與 metadata 驗證
+- `retrieve` CLI 輸入與輸出格式
+- CLI 未注入 in-memory Retriever 時不顯示 traceback
+- 尚未實作 persistence、standalone index loading、Generation 或完整 Pipeline

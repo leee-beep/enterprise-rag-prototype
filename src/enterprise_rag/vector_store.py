@@ -62,12 +62,7 @@ class FaissVectorStore:
         """Return the common embedding-vector dimension."""
         return self._dimension
 
-    def search(
-        self,
-        query_vector: Sequence[float],
-        top_k: int,
-    ) -> tuple[EmbeddedChunk, ...]:
-        """Return the nearest embedded chunks ordered by squared L2 distance."""
+    def _validate_query(self, query_vector: Sequence[float], top_k: int) -> None:
         if top_k < 1:
             raise VectorStoreValidationError("top_k must be greater than or equal to 1.")
         if len(query_vector) == 0:
@@ -78,12 +73,31 @@ class FaissVectorStore:
                 f"expected {self._dimension}, received {len(query_vector)}."
             )
 
+    def search_with_scores(
+        self,
+        query_vector: Sequence[float],
+        top_k: int,
+    ) -> tuple[tuple[EmbeddedChunk, float], ...]:
+        """Return chunks paired with squared L2 distances, nearest first."""
+        self._validate_query(query_vector, top_k)
         query = np.asarray([query_vector], dtype=np.float32)
         result_count = min(top_k, self.size)
-        _, indices = self._index.search(query, result_count)
-        return tuple(self._items[index] for index in indices[0] if index >= 0)
+        distances, indices = self._index.search(query, result_count)
+        return tuple(
+            (self._items[index], float(distance))
+            for index, distance in zip(indices[0], distances[0])
+            if index >= 0
+        )
 
-
+    def search(
+        self,
+        query_vector: Sequence[float],
+        top_k: int,
+    ) -> tuple[EmbeddedChunk, ...]:
+        """Return nearest chunks while preserving the original public API."""
+        return tuple(
+            item for item, _distance in self.search_with_scores(query_vector, top_k)
+        )
 def build_vector_store(
     embedded_chunks: Sequence[EmbeddedChunk],
 ) -> FaissVectorStore:
