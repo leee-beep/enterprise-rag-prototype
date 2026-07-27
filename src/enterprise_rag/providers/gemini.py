@@ -6,7 +6,7 @@ from typing import Any
 
 from enterprise_rag.config import Settings
 from enterprise_rag.embeddings import validate_embedding_vectors
-from enterprise_rag.generation import validate_generated_text
+from enterprise_rag.generation import validate_generated_text, validate_generation_prompt
 
 class GeminiEmbeddingClient:
     def __init__(self, settings: Settings, *, sdk_client: Any | None = None) -> None:
@@ -39,6 +39,14 @@ class GeminiGenerationClient:
         self._settings = settings
         self._client = sdk_client
 
+    @property
+    def provider(self) -> str:
+        return "gemini"
+
+    @property
+    def model(self) -> str:
+        return self._settings.generation_model
+
     def _sdk_client(self) -> Any:
         api_key = self._settings.require_gemini_api_key()
         if self._client is None:
@@ -47,8 +55,9 @@ class GeminiGenerationClient:
         return self._client
 
     def generate(self, prompt: str) -> str:
+        prompt = validate_generation_prompt(prompt)
         response = self._sdk_client().models.generate_content(
-            model=self._settings.generation_model,
+            model=self.model,
             contents=prompt,
         )
         return validate_generated_text(getattr(response, "text", None))

@@ -8,7 +8,11 @@ from typing import Any, Protocol
 from urllib import error, request
 
 from enterprise_rag.embeddings import EmbeddingValidationError, validate_embedding_vectors
-from enterprise_rag.generation import GenerationValidationError, validate_generated_text
+from enterprise_rag.generation import (
+    GenerationValidationError,
+    validate_generated_text,
+    validate_generation_prompt,
+)
 
 class OllamaError(RuntimeError):
     """Base error for Ollama transport and response failures."""
@@ -99,7 +103,12 @@ class OllamaGenerationClient:
         self.timeout = timeout
         self._transport = transport or UrllibJsonTransport()
 
+    @property
+    def provider(self) -> str:
+        return "ollama"
+
     def generate(self, prompt: str) -> str:
+        prompt = validate_generation_prompt(prompt)
         result = self._transport.post_json(
             f"{self.base_url}/api/generate",
             {"model": self.model, "prompt": prompt, "stream": False},

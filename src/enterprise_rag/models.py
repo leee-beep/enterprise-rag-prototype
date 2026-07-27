@@ -74,3 +74,17 @@ class RetrievalResult:
         )
         object.__setattr__(self, "score", score)
         object.__setattr__(self, "metadata", MappingProxyType(normalized))
+
+@dataclass(frozen=True)
+class GenerationResult:
+    """Validated provider-level generation output."""
+    answer: str
+    provider: str
+    model: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("answer", "provider", "model"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"GenerationResult {field_name} must not be empty.")
+            object.__setattr__(self, field_name, value.strip())
