@@ -4,13 +4,17 @@ A local-first, modular Retrieval-Augmented Generation engineering prototype.
 
 ## Current Status
 
-The repository implements document ingestion, chunking, provider-selectable embeddings, in-memory vector search, and provider-independent retrieval. It does **not** yet implement an end-to-end natural-language question-answering pipeline.
+The repository implements document ingestion, chunking, provider-selectable
+embeddings, FAISS vector search and persistence, provider-independent retrieval,
+and a one-shot RAG question-answering pipeline. Application assembly still
+requires an existing index and explicitly configured model providers.
 
 ### Completed
 
 - Standard Python `src` layout and editable installation
 - Environment-based configuration with delayed Gemini API-key validation
 - Recursive TXT and Markdown ingestion
+- Deterministic local Markdown/MDX document import with a versioned manifest
 - Configurable JSON and JSONL structured extraction
 - Deterministic character-based chunking with metadata preservation
 - Provider-neutral `EmbeddingClient` and `GenerationClient` interfaces
@@ -19,17 +23,18 @@ The repository implements document ingestion, chunking, provider-selectable embe
 - Independent embedding and generation provider selection
 - Shared empty-vector, finite-number, dimension, and generated-text validation
 - In-memory FAISS `IndexFlatL2` build and scored search
+- Versioned FAISS index and chunk-metadata persistence
 - Provider-independent `Retriever` with Top-K results and normalized metadata
-- Injectable `retrieve` CLI command formatting for score, source, and chunk
+- Context formatting, prompt construction, and one-shot `RAGPipeline`
+- `retrieve`, `generate`, `ask`, and injected `build-index` CLI boundaries
 - Fully offline tests with fake SDK clients and HTTP transports
 
 ### Not Yet Implemented
 
 - PDF ingestion
-- Retriever orchestration and query-to-index search flow
-- Complete RAG pipeline
-- FAISS persistence, manifest, and index lifecycle management
-- CLI application
+- Full MDX cleaning and conversion into ingestion-ready documents
+- Standalone document-to-index application assembly
+- Automated index rebuilding and lifecycle management
 - Source citations
 - Retrieval and answer-quality evaluation
 - API or UI
@@ -51,7 +56,8 @@ EmbeddedChunk
 In-memory FAISS
 ```
 
-Generation clients can accept a prompt and return text, but they are not connected to retrieval. The project therefore cannot yet answer a natural-language question end to end.
+The one-shot RAG pipeline connects retrieval to generation. It does not add
+citations, memory, streaming, reranking, or multi-turn chat.
 
 ## Provider Architecture
 
@@ -110,9 +116,71 @@ Provider tests inject fake SDK clients or HTTP transports. They do not call Gemi
 ## Data and Security
 
 - `data/documents/` is local-only except for `.gitkeep`.
+- `data/raw_documents/` contains close-to-source third-party imports and is
+  local-only except for `.gitkeep`.
 - `data/private/`, generated indexes, logs, and caches are ignored.
 - `data/samples/` and `tests/fixtures/` contain public fictional data.
 - Real embedding requests send chunk text to the selected provider; do not process confidential or personal data without authorization.
+
+## Document Import
+
+`data/raw_documents/` stores selected, close-to-source third-party Markdown or
+MDX files. It is separate from `data/documents/`, which is the input area for
+documents that are ready for the ingestion and indexing workflow. Importing raw
+documents does not clean MDX, create embeddings, or build a FAISS index.
+
+Preview the deterministic LangChain document selection without writing files:
+
+```powershell
+python scripts/import_docs.py `
+  --source ..\langchain-docs-source\src `
+  --output data\raw_documents\langchain `
+  --dry-run `
+  --verbose
+```
+
+Run the import after reviewing the preview:
+
+```powershell
+python scripts/import_docs.py `
+  --source ..\langchain-docs-source\src `
+  --output data\raw_documents\langchain
+```
+
+Imported third-party documentation remains subject to its original license and
+usage terms. The user is responsible for confirming that copying, processing,
+and later sending any content to a model provider is permitted. Imported
+contents and manifests under `data/raw_documents/` are ignored by Git by
+default; the external LangChain repository is never copied into this project.
+
+## Document Cleaning & Normalization
+
+`data/raw_documents/` contains close-to-source imports. The cleaning command
+conservatively converts selected `.md`/`.mdx` files into UTF-8 Markdown under
+`data/documents/`, where the existing Markdown loader can read them. Preview a
+complete in-memory cleaning pass without writing files:
+
+```powershell
+python scripts/clean_documents.py `
+  --input data\raw_documents\langchain `
+  --output data\documents\langchain `
+  --dry-run `
+  --verbose
+```
+
+After reviewing warnings, write cleaned Markdown and the cleaning manifest:
+
+```powershell
+python scripts/clean_documents.py `
+  --input data\raw_documents\langchain `
+  --output data\documents\langchain
+```
+
+The cleaner preserves code and useful text while removing presentation-layer
+MDX syntax. It is a conservative first-pass converter, not a complete MDX
+renderer. Cleaning does not create embeddings or a FAISS index. Raw and cleaned
+third-party content are ignored by Git by default, and the user remains
+responsible for the source documents' license and permitted use.
 
 ## Original Notebook
 
@@ -130,4 +198,8 @@ Retriever results use `score = 1 / (1 + squared_l2_distance)`. This is a monoton
 
 The `retrieve` subcommand presentation layer accepts a question, calls an already-injected in-memory `Retriever`, and prints Top-K score, source, and chunk text. It does not build or load an index, embed documents, generate an answer, or invoke a pipeline.
 
-The index is currently in-memory only. A new independent process cannot automatically access an index created by an earlier process because persistence and standalone index loading are not implemented. Running the module without an injected Retriever returns a concise configuration error without an internal traceback. A standalone CLI workflow belongs to the later Pipeline/Persistence milestone.
+Persisted indexes can be loaded by `ask --index-path`. The `retrieve` command
+still requires an injected `Retriever`, and `build-index` requires an injected
+builder because the CLI does not silently load documents, call an embedding
+provider, or rebuild an index. Missing application dependencies produce a
+concise configuration error without an internal traceback.

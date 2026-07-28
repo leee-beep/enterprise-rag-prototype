@@ -230,6 +230,8 @@ env/
 # Local documents and generated vector indexes
 data/documents/*
 !data/documents/.gitkeep
+data/raw_documents/*
+!data/raw_documents/.gitkeep
 data/vector_store/
 vector_store/
 faiss_index/

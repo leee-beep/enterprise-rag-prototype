@@ -11,6 +11,7 @@ from enterprise_rag.models import DocumentLoadWarning, LoadedDocument
 
 SUPPORTED_EXTENSIONS = frozenset({".md", ".txt", ".json", ".jsonl"})
 JSON_EXTENSIONS = frozenset({".json", ".jsonl"})
+IGNORED_CONTROL_FILES = frozenset({"cleaning_manifest.json"})
 
 class DocumentLoadingError(RuntimeError): pass
 class DocumentsDirectoryNotFoundError(DocumentLoadingError): pass
@@ -31,7 +32,9 @@ def load_documents(source_dir: Path, *, json_config: JsonLoaderSettings | None =
     source_dir = Path(source_dir).expanduser().resolve()
     if not source_dir.exists() or not source_dir.is_dir():
         raise DocumentsDirectoryNotFoundError(f"Documents directory does not exist or is not a directory: {source_dir}")
-    files = sorted((p for p in source_dir.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS),
+    files = sorted((p for p in source_dir.rglob("*") if p.is_file()
+                    and p.name.casefold() not in IGNORED_CONTROL_FILES
+                    and p.suffix.lower() in SUPPORTED_EXTENSIONS),
                    key=lambda p: p.relative_to(source_dir).as_posix().casefold())
     if not files:
         raise NoSupportedDocumentsError(f"文件目錄中找不到支援的檔案：{source_dir}。目前支援：{', '.join(sorted(SUPPORTED_EXTENSIONS))}。")
