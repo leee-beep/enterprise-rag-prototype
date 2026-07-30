@@ -6,8 +6,9 @@ A local-first, modular Retrieval-Augmented Generation engineering prototype.
 
 The repository implements document ingestion, chunking, provider-selectable
 embeddings, FAISS vector search and persistence, provider-independent retrieval,
-and a one-shot RAG question-answering pipeline. Application assembly still
-requires an existing index and explicitly configured model providers.
+and a one-shot RAG question-answering pipeline. The application can now build
+a persisted index from local documents and requires explicitly configured
+model providers for real embedding or generation calls.
 
 ### Completed
 
@@ -26,14 +27,12 @@ requires an existing index and explicitly configured model providers.
 - Versioned FAISS index and chunk-metadata persistence
 - Provider-independent `Retriever` with Top-K results and normalized metadata
 - Context formatting, prompt construction, and one-shot `RAGPipeline`
-- `retrieve`, `generate`, `ask`, and injected `build-index` CLI boundaries
+- Runnable `build-index`, persisted-index `ask`, and provider-level CLI commands
 - Fully offline tests with fake SDK clients and HTTP transports
 
 ### Not Yet Implemented
 
 - PDF ingestion
-- Full MDX cleaning and conversion into ingestion-ready documents
-- Standalone document-to-index application assembly
 - Automated index rebuilding and lifecycle management
 - Source citations
 - Retrieval and answer-quality evaluation
@@ -43,17 +42,22 @@ requires an existing index and explicitly configured model providers.
 ## Current Data Flow
 
 ```text
+External Markdown / MDX
+        → Document Import
+        → data/raw_documents/
+        → Document Cleaning
+        → data/documents/
+
 TXT / MD / JSON / JSONL
-        ↓
-LoadedDocument
-        ↓
-DocumentChunk
-        ↓
-Selected Embedding Provider (Gemini or Ollama)
-        ↓
-EmbeddedChunk
-        ↓
-In-memory FAISS
+        → LoadedDocument
+        → DocumentChunk
+        → Selected Embedding Provider (Gemini or Ollama)
+        → EmbeddedChunk
+        → In-memory FAISS
+        → Persisted FAISS index and build manifest
+        → Ask
+        → Retrieval
+        → Generation
 ```
 
 The one-shot RAG pipeline connects retrieval to generation. It does not add
@@ -88,7 +92,12 @@ Only the selected provider is called for an operation. The application does not 
 
 ### Index Compatibility Rule
 
-Document embeddings used to build a FAISS index and query embeddings used to search it must use the same embedding provider, model, and vector space. Generation is independent and can use either provider. An index manifest is not implemented yet, so this compatibility must currently be managed by the user.
+Document embeddings used to build a FAISS index and query embeddings used to
+search it must use the same embedding provider, model, and vector space.
+Generation is independent and can use either provider. New indexes include a
+versioned `index_manifest.json`; `ask` rejects a provider/model mismatch before
+querying. Legacy indexes without this manifest remain loadable but cannot
+receive that compatibility check.
 
 ### Ollama Setup
 
@@ -112,6 +121,73 @@ Runtime and test dependencies are declared in `pyproject.toml`; `requirements.tx
 ```
 
 Provider tests inject fake SDK clients or HTTP transports. They do not call Gemini, localhost, Ollama, or any external network.
+
+## Build Index
+
+The standalone indexing service reads cleaned documents, chunks them, calls the
+configured embedding provider, builds an in-memory FAISS `IndexFlatL2`, and
+safely publishes the persisted index. Defaults come from `DOCUMENTS_DIR` and
+`VECTOR_STORE_DIR` in `.env`:
+
+```powershell
+python -m enterprise_rag build-index
+```
+
+Paths can be overridden explicitly:
+
+```powershell
+python -m enterprise_rag build-index `
+  --input data\documents `
+  --output data\vector_store `
+  --verbose
+```
+
+If the output directory already exists, the command stops without modifying
+it. Review the path and explicitly request replacement:
+
+```powershell
+python -m enterprise_rag build-index `
+  --input data\documents `
+  --output data\vector_store `
+  --overwrite `
+  --verbose
+```
+
+Index creation happens in a sibling temporary directory. Only a complete,
+reloadable FAISS index, metadata file, and build manifest replace the final
+directory. A failed build does not delete the previous index.
+
+Gemini indexing requires `GEMINI_API_KEY` and sends document chunks to the
+configured Gemini embedding model. Ollama indexing requires the configured
+local Ollama service and embedding model to already be available. The project
+does not download models, start Ollama, or silently switch providers.
+
+Successful output includes:
+
+```text
+Documents loaded: ...
+Chunks created: ...
+Vectors embedded: ...
+Embedding dimension: ...
+Index saved to: ...
+```
+
+The generated `index_manifest.json` records its schema version, build time,
+source identifier, embedding provider/model/dimension, chunk settings,
+document count, and chunk count. Generated indexes under `data/vector_store/`
+are local artifacts and are ignored by Git.
+
+After building an index, ask a one-shot question with the same embedding
+provider and model:
+
+```powershell
+python -m enterprise_rag ask `
+  --index-path data\vector_store `
+  "What is retrieval-augmented generation?"
+```
+
+This command performs retrieval and generation through the configured
+providers. It does not rebuild the index automatically.
 
 ## Data and Security
 
@@ -173,7 +249,8 @@ After reviewing warnings, write cleaned Markdown and the cleaning manifest:
 ```powershell
 python scripts/clean_documents.py `
   --input data\raw_documents\langchain `
-  --output data\documents\langchain
+  --output data\documents\langchain `
+  --strict
 ```
 
 The cleaner preserves code and useful text while removing presentation-layer
@@ -181,6 +258,26 @@ MDX syntax. It is a conservative first-pass converter, not a complete MDX
 renderer. Cleaning does not create embeddings or a FAISS index. Raw and cleaned
 third-party content are ignored by Git by default, and the user remains
 responsible for the source documents' license and permitted use.
+
+Strict mode is the safe default. It preflights every source, reports all
+invalid files, and publishes nothing unless the whole batch is valid. When a
+trusted upstream corpus contains known malformed documents, explicitly use
+non-strict mode:
+
+```powershell
+python scripts/clean_documents.py `
+  --input data\raw_documents\langchain `
+  --output data\documents\langchain `
+  --skip-invalid `
+  --verbose
+```
+
+Non-strict mode records every invalid or empty source and its reason in the
+versioned `cleaning_manifest.json`, then publishes all valid documents.
+Cleaning is prepared in a sibling temporary directory; the complete document
+tree and manifest replace the final output together. A failed preflight or
+publish does not damage an existing complete dataset and does not leave a
+manifest-free partial output.
 
 ## Original Notebook
 
@@ -199,7 +296,8 @@ Retriever results use `score = 1 / (1 + squared_l2_distance)`. This is a monoton
 The `retrieve` subcommand presentation layer accepts a question, calls an already-injected in-memory `Retriever`, and prints Top-K score, source, and chunk text. It does not build or load an index, embed documents, generate an answer, or invoke a pipeline.
 
 Persisted indexes can be loaded by `ask --index-path`. The `retrieve` command
-still requires an injected `Retriever`, and `build-index` requires an injected
-builder because the CLI does not silently load documents, call an embedding
-provider, or rebuild an index. Missing application dependencies produce a
-concise configuration error without an internal traceback.
+still requires an injected `Retriever`; it remains a presentation boundary for
+tests and application composition. `build-index` is now the explicit command
+that loads documents and calls the selected embedding provider. Missing
+configuration or indexing failures produce a concise error without an internal
+traceback.

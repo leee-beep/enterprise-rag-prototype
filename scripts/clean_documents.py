@@ -30,6 +30,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-name", default="langchain")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--strict",
+        dest="strict",
+        action="store_true",
+        default=True,
+        help="Reject the whole batch if any source is invalid (default).",
+    )
+    mode.add_argument(
+        "--skip-invalid",
+        dest="strict",
+        action="store_false",
+        help="Skip invalid sources, record them in the manifest, and publish the rest.",
+    )
     return parser
 
 
@@ -42,6 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=args.output,
                 source_name=args.source_name,
                 dry_run=args.dry_run,
+                strict=args.strict,
             )
         ).run()
     except DocumentCleaningError as exc:
@@ -58,6 +73,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Scanned: {result.scanned_count}")
     print(f"Cleaned: {result.cleaned_count}")
     print(f"Skipped: {result.skipped_count}")
+    print(f"Invalid: {result.invalid_count}")
+    print(f"Empty: {result.empty_count}")
+    print(f"Errors: {result.error_count}")
     print(f"Warnings: {result.warning_count}")
     print(f"Output: {args.output}")
     return 0

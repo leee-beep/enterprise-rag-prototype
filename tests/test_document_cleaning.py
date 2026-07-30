@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ import pytest
 
 from enterprise_rag.document_cleaning import (
     CLEANING_MANIFEST_NAME,
+    CleaningBatchError,
     CleaningConfig,
     CleaningPathError,
     CleaningReadError,
@@ -48,9 +50,20 @@ def clean(text: str, *, name: str = "guide.mdx"):
     )
 
 
-def cleaner(input_dir: Path, output_dir: Path, *, dry_run=False):
+def cleaner(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    dry_run: bool = False,
+    strict: bool = True,
+):
     return MarkdownDocumentCleaner(
-        CleaningConfig(input_dir, output_dir, dry_run=dry_run),
+        CleaningConfig(
+            input_dir,
+            output_dir,
+            dry_run=dry_run,
+            strict=strict,
+        ),
         now_utc=lambda: datetime(2026, 7, 28, 2, 3, 4, tzinfo=timezone.utc),
     )
 
@@ -123,7 +136,7 @@ def test_invalid_utf8_names_relative_source(tmp_path: Path) -> None:
     path = root / "bad.mdx"
     path.parent.mkdir()
     path.write_bytes(b"\xff\xfe")
-    with pytest.raises(CleaningReadError, match="bad.mdx"):
+    with pytest.raises(CleaningBatchError, match="CleaningReadError.*bad.mdx"):
         cleaner(root, tmp_path / "documents").run()
 
 
@@ -256,7 +269,7 @@ def test_clean_run_structure_hashes_manifest_and_repeat_skip(tmp_path: Path) -> 
     assert destination.is_file()
     assert item["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert item["output_sha256"] == hashlib.sha256(destination.read_bytes()).hexdigest()
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["generated_at"] == "2026-07-28T02:03:04+00:00"
     assert manifest["input_root"] == "raw"
     assert "private-user" not in json.dumps(manifest)
@@ -382,3 +395,301 @@ def test_cli_expected_error_and_all_empty_exit_two(tmp_path: Path) -> None:
     )
     assert empty.returncode == 2
     assert "No source documents produced" in empty.stderr
+
+
+@pytest.mark.parametrize("indent", ["", " ", "  ", "   "])
+def test_fence_closing_allows_zero_to_three_spaces(indent: str) -> None:
+    block = f"```python\nprint('ok')\n{indent}```"
+    result = clean(f"---\ntitle: Fence\n---\n{block}")
+    assert block in result.text
+
+
+def test_four_space_nested_fence_does_not_close_outer_block() -> None:
+    block = (
+        "```python\n"
+        "def prompt():\n"
+        "    \"\"\"\n"
+        "    ```<prompt:system>\n"
+        "    Keep this nested prompt.\n"
+        "    ```\n"
+        "    \"\"\"\n"
+        "```\n"
+    )
+    result = clean(f"---\ntitle: Nested\n---\n{block}")
+    assert block.rstrip("\n") in result.text
+    assert result.text.count("```") == block.count("```")
+
+
+def test_four_space_fence_alone_is_not_a_markdown_fence() -> None:
+    source = "# Guide\n\n    ```python\n    print('literal')\n"
+    result = clean(source)
+    assert "    ```python" in result.text
+
+
+def test_unclosed_fence_error_contains_type_and_source_path() -> None:
+    with pytest.raises(
+        CleaningSyntaxError,
+        match=r"CleaningSyntaxError.*concepts/broken\.mdx.*not closed",
+    ):
+        clean("# Guide\n```python\nprint('broken')", name="broken.mdx")
+
+
+def test_code_comment_does_not_replace_frontmatter_title() -> None:
+    result = clean(
+        "---\ntitle: Retrieval\n---\n"
+        "Intro.\n\n```python\n# code comment\nprint('ok')\n```\n"
+    )
+    assert "# Retrieval\n" in result.text
+    assert result.title == "Retrieval"
+
+
+def test_real_body_h1_prevents_duplicate_frontmatter_title() -> None:
+    result = clean(
+        "---\ntitle: Front title\n---\n"
+        "# Body title\n\n```python\n# code comment\n```\n"
+    )
+    assert result.text.count("# Body title") == 1
+    assert "# Front title" not in result.text
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            '<Card\n  title="Retriever"\n  href="/retrieval"\n>\n'
+            "Readable card body.\n</Card>",
+            "### [Retriever](/retrieval)",
+        ),
+        (
+            '<Accordion\n  title="Advanced"\n>\nDetails.\n</Accordion>',
+            "### Advanced",
+        ),
+        (
+            '<Tabs\n  defaultValue="python"\n>\n'
+            '<TabItem\n  label="Python"\n>\nCode\n</TabItem>\n</Tabs>',
+            "#### Python",
+        ),
+        (
+            '<Note\n  title="Remember"\n>\nUseful note.\n</Note>',
+            "> **Remember:**",
+        ),
+        (
+            '<Warning\n  title="Careful"\n>\nWarning body.\n</Warning>',
+            "> **Careful:**",
+        ),
+        (
+            '<Tip\n  title="Hint"\n>\nTip body.\n</Tip>',
+            "> **Hint:**",
+        ),
+        (
+            '<CodeGroup\n  label="Examples"\n>\n'
+            "```python\nprint('kept')\n```\n</CodeGroup>",
+            "```python",
+        ),
+    ],
+)
+def test_multiline_known_components_preserve_content(
+    source: str,
+    expected: str,
+) -> None:
+    result = clean(f"---\ntitle: Components\n---\n{source}")
+    assert expected in result.text
+    assert not re.search(
+        r"</?(?:Card|Accordion|Tabs|TabItem|Note|Warning|Tip|CodeGroup)\b",
+        result.text,
+    )
+
+
+def test_multiline_jsx_inside_code_block_is_unchanged() -> None:
+    block = (
+        "```mdx\n"
+        "<Card\n"
+        '  title=\"Do not transform\"\n'
+        ">\n"
+        "Code sample\n"
+        "</Card>\n"
+        "```\n"
+    )
+    result = clean(f"---\ntitle: Code\n---\n{block}")
+    assert block.rstrip("\n") in result.text
+
+
+def test_fenced_code_preserves_trailing_spaces_and_blank_lines() -> None:
+    block = (
+        "```text\n"
+        "line with spaces   \n"
+        "\n"
+        "\n"
+        "\n"
+        "last line\n"
+        "```\n"
+    )
+    result = clean(f"---\ntitle: Exact Code\n---\nBefore.\n\n{block}\nAfter.")
+    assert block.rstrip("\n") in result.text
+
+
+def test_strict_mode_collects_all_errors_without_publishing(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "raw"
+    output = tmp_path / "documents"
+    write(root / "good.mdx", "# Good\n\nUseful body.")
+    write(root / "first.mdx", "```python\nbroken")
+    write(root / "nested" / "second.mdx", "---\ntitle: Broken")
+    output.mkdir()
+    marker = write(output / "existing.md", "stable output")
+
+    with pytest.raises(CleaningBatchError) as caught:
+        cleaner(root, output, strict=True).run()
+
+    message = str(caught.value)
+    assert "first.mdx" in message
+    assert "nested/second.mdx" in message
+    assert marker.read_text(encoding="utf-8") == "stable output"
+    assert not (output / CLEANING_MANIFEST_NAME).exists()
+    assert not list(tmp_path.glob(".documents.cleaning-*"))
+
+
+def test_non_strict_mode_skips_invalid_and_publishes_manifest(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "raw"
+    output = tmp_path / "documents"
+    write(root / "good.mdx", "---\ntitle: Good\n---\nUseful body.")
+    write(root / "broken.mdx", "```python\nbroken")
+
+    result = cleaner(root, output, strict=False).run()
+    manifest = json.loads(
+        (output / CLEANING_MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+
+    assert result.invalid_count == 1
+    assert result.error_count == 0
+    assert (output / "good.md").is_file()
+    assert not (output / "broken.md").exists()
+    assert manifest["invalid_count"] == 1
+    assert manifest["error_count"] == 0
+    invalid = next(
+        item for item in manifest["files"] if item["status"] == "INVALID"
+    )
+    assert invalid["source_relative_path"] == "broken.mdx"
+    assert "CleaningSyntaxError" in invalid["error"]
+
+
+def test_successful_publish_replaces_stale_dataset_as_a_unit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "raw"
+    output = tmp_path / "documents"
+    write(root / "fresh.mdx", "# Fresh\n\nUseful body.")
+    output.mkdir()
+    write(output / "stale.md", "stale")
+
+    cleaner(root, output).run()
+
+    assert (output / "fresh.md").is_file()
+    assert not (output / "stale.md").exists()
+    assert (output / CLEANING_MANIFEST_NAME).is_file()
+    assert not list(tmp_path.glob(".documents.cleaning-*"))
+
+
+def test_publish_failure_restores_existing_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "raw"
+    output = tmp_path / "documents"
+    write(root / "fresh.mdx", "# Fresh\n\nUseful body.")
+    output.mkdir()
+    marker = write(output / "stable.md", "stable")
+    real_replace = os.replace
+
+    def fail_final_publish(source: str | Path, destination: str | Path) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            ".cleaning-tmp-" in source_path.name
+            and destination_path == output.resolve()
+        ):
+            raise OSError("simulated publish failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(
+        "enterprise_rag.document_cleaning.os.replace",
+        fail_final_publish,
+    )
+
+    with pytest.raises(CleaningWriteError, match="safely publish"):
+        cleaner(root, output).run()
+
+    assert marker.read_text(encoding="utf-8") == "stable"
+    assert not (output / "fresh.md").exists()
+    assert not list(tmp_path.glob(".documents.cleaning-*"))
+
+
+def test_manifest_schema_two_counts_and_configuration(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "raw"
+    output = tmp_path / "documents"
+    write(root / "good.mdx", "# Good\n\nUseful body.")
+    write(root / "empty.mdx", "<Frame><Badge /></Frame>")
+    write(root / "broken.mdx", "```python\nbroken")
+
+    result = cleaner(root, output, strict=False).run()
+    manifest = json.loads(
+        (output / CLEANING_MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+
+    assert result.scanned_count == 3
+    assert result.cleaned_count == 1
+    assert result.skipped_count == 0
+    assert result.invalid_count == 1
+    assert result.empty_count == 1
+    assert result.error_count == 0
+    assert manifest["schema_version"] == 2
+    assert manifest["extension_mapping"] == {".md": ".md", ".mdx": ".md"}
+    assert manifest["configuration"] == {
+        "cleaner_schema_version": 2,
+        "strict": False,
+        "supported_extensions": [".md", ".mdx"],
+    }
+    assert manifest["scanned_count"] == 3
+    assert manifest["cleaned_count"] == 1
+    assert manifest["skipped_count"] == 0
+    assert manifest["invalid_count"] == 1
+    assert manifest["empty_count"] == 1
+    assert manifest["error_count"] == 0
+    assert len(manifest["skipped_or_error_files"]) == 2
+
+
+def test_cli_skip_invalid_reports_counts_without_traceback(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "raw"
+    output = tmp_path / "documents"
+    write(root / "good.mdx", "# Good\n\nUseful body.")
+    write(root / "broken.mdx", "```python\nbroken")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "--input",
+            str(root),
+            "--output",
+            str(output),
+            "--skip-invalid",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "Cleaned: 1" in completed.stdout
+    assert "Invalid: 1" in completed.stdout
+    assert "Errors: 0" in completed.stdout
+    assert "Traceback" not in completed.stderr

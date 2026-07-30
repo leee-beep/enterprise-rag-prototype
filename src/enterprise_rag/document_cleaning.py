@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -13,14 +14,14 @@ from pathlib import Path
 
 from enterprise_rag.document_import import describe_source_root
 
-CLEANING_SCHEMA_VERSION = 1
+CLEANING_SCHEMA_VERSION = 2
 CLEANING_MANIFEST_NAME = "cleaning_manifest.json"
 SUPPORTED_EXTENSIONS = frozenset({".md", ".mdx"})
 FRONT_MATTER_KEYS = frozenset(
     {"title", "description", "source", "slug", "tags"}
 )
 TAG_PATTERN = re.compile(
-    r"<(?P<closing>/)?(?P<name>[A-Za-z][\w.-]*)(?P<attrs>[^<>\n]*?)(?P<self>/)?>"
+    r"<(?P<closing>/)?(?P<name>[A-Za-z][\w.-]*)(?P<attrs>[^<>]*?)(?P<self>/)?>"
 )
 ATTRIBUTE_PATTERN = re.compile(
     r"([\w:-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|\{[\"']([^\"']*)[\"']\})"
@@ -64,6 +65,10 @@ class CleaningSyntaxError(DocumentCleaningError):
     """Raised for an unsafe-to-continue source structure."""
 
 
+class CleaningBatchError(DocumentCleaningError):
+    """Raised after strict-mode preflight collects all invalid sources."""
+
+
 class DestinationCollisionError(DocumentCleaningError):
     """Raised when multiple sources map to the same Markdown output."""
 
@@ -80,6 +85,7 @@ class CleaningConfig:
     output_dir: Path
     source_name: str = "langchain"
     dry_run: bool = False
+    strict: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_dir", Path(self.input_dir))
@@ -104,6 +110,7 @@ class CleanedFileResult:
     transformations: tuple[str, ...]
     warnings: tuple[str, ...]
     status: str
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,9 @@ class CleaningResult:
     output_paths: tuple[Path, ...]
     warnings: tuple[str, ...]
     files: tuple[CleanedFileResult, ...]
+    invalid_count: int = 0
+    empty_count: int = 0
+    error_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,28 +159,64 @@ class MarkdownDocumentCleaner:
         sources, discovery_warnings = discover_source_documents(input_root)
         destinations = validate_destinations(sources, input_root)
         results: list[CleanedFileResult] = []
+        prepared_outputs: list[tuple[CleanedFileResult, bytes]] = []
         output_paths: list[Path] = []
         warnings = list(discovery_warnings)
         cleaned_count = 0
         skipped_count = 0
+        invalid_count = 0
+        empty_count = 0
+        errors: list[tuple[str, str]] = []
 
         for source, destination_relative in zip(sources, destinations):
             relative = source.relative_to(input_root)
-            source_bytes = _read_source_bytes(source, relative)
-            source_sha = hashlib.sha256(source_bytes).hexdigest()
             try:
+                source_bytes = _read_source_bytes(source, relative)
+                source_sha = hashlib.sha256(source_bytes).hexdigest()
                 source_text = source_bytes.decode("utf-8-sig")
+                cleaned = clean_markdown_text(
+                    source_text,
+                    source_relative_path=relative.as_posix(),
+                    source_name=self.config.source_name,
+                    source_sha256=source_sha,
+                    fallback_title=source.stem,
+                )
             except UnicodeDecodeError as exc:
-                raise CleaningReadError(
-                    f"Source document is not valid UTF-8: '{relative.as_posix()}'."
-                ) from exc
-            cleaned = clean_markdown_text(
-                source_text,
-                source_relative_path=relative.as_posix(),
-                source_name=self.config.source_name,
-                source_sha256=source_sha,
-                fallback_title=source.stem,
-            )
+                error = (
+                    f"CleaningReadError in '{relative.as_posix()}': "
+                    "source document is not valid UTF-8."
+                )
+                invalid_count += 1
+                errors.append((relative.as_posix(), error))
+                warnings.append(error)
+                results.append(
+                    _invalid_file_result(
+                        relative,
+                        destination_relative,
+                        source,
+                        error,
+                    )
+                )
+                continue
+            except DocumentCleaningError as exc:
+                error = str(exc)
+                if relative.as_posix() not in error:
+                    error = (
+                        f"{type(exc).__name__} in '{relative.as_posix()}': "
+                        f"{error}"
+                    )
+                invalid_count += 1
+                errors.append((relative.as_posix(), error))
+                warnings.append(error)
+                results.append(
+                    _invalid_file_result(
+                        relative,
+                        destination_relative,
+                        source,
+                        error,
+                    )
+                )
+                continue
             file_warnings = tuple(
                 f"{relative.as_posix()}: {warning}"
                 for warning in cleaned.warnings
@@ -179,7 +225,8 @@ class MarkdownDocumentCleaner:
             destination = output_root / destination_relative
 
             if not has_meaningful_content(cleaned.text):
-                skipped_count += 1
+                empty_count += 1
+                message = "No meaningful content remained."
                 results.append(
                     CleanedFileResult(
                         relative.as_posix(),
@@ -192,12 +239,13 @@ class MarkdownDocumentCleaner:
                         cleaned.title,
                         cleaned.front_matter,
                         cleaned.transformations,
-                        file_warnings + ("No meaningful content remained.",),
-                        "SKIP",
+                        file_warnings + (message,),
+                        "EMPTY",
+                        message,
                     )
                 )
                 warnings.append(
-                    f"{relative.as_posix()}: No meaningful content remained."
+                    f"{relative.as_posix()}: {message}"
                 )
                 continue
 
@@ -213,26 +261,33 @@ class MarkdownDocumentCleaner:
             else:
                 status = "UPDATE" if destination.exists() else "CLEAN"
                 cleaned_count += 1
-                if not self.config.dry_run:
-                    atomic_write_bytes(destination, output_bytes)
             output_paths.append(destination)
-            results.append(
-                CleanedFileResult(
-                    relative.as_posix(),
-                    destination_relative.as_posix(),
-                    source.suffix.casefold(),
-                    source_sha,
-                    output_sha,
-                    len(source_bytes),
-                    len(output_bytes),
-                    cleaned.title,
-                    cleaned.front_matter,
-                    cleaned.transformations,
-                    file_warnings,
-                    status,
-                )
+            file_result = CleanedFileResult(
+                relative.as_posix(),
+                destination_relative.as_posix(),
+                source.suffix.casefold(),
+                source_sha,
+                output_sha,
+                len(source_bytes),
+                len(output_bytes),
+                cleaned.title,
+                cleaned.front_matter,
+                cleaned.transformations,
+                file_warnings,
+                status,
             )
+            results.append(file_result)
+            prepared_outputs.append((file_result, output_bytes))
 
+        if errors and self.config.strict:
+            details = "\n".join(
+                f"- {relative}: {message}"
+                for relative, message in errors
+            )
+            raise CleaningBatchError(
+                f"Strict cleaning preflight found {len(errors)} invalid "
+                f"document(s); no output was published:\n{details}"
+            )
         if not output_paths:
             raise NoCleanDocumentsError(
                 "No source documents produced meaningful cleaned Markdown."
@@ -245,14 +300,20 @@ class MarkdownDocumentCleaner:
             output_paths=tuple(output_paths),
             warnings=tuple(warnings),
             files=tuple(results),
+            invalid_count=invalid_count,
+            empty_count=empty_count,
+            error_count=0,
         )
         if not self.config.dry_run:
-            self._write_manifest(result, output_root)
+            manifest = self._manifest_bytes(result)
+            _publish_cleaned_dataset(
+                output_root,
+                prepared_outputs,
+                manifest,
+            )
         return result
 
-    def _write_manifest(
-        self, result: CleaningResult, output_root: Path
-    ) -> None:
+    def _manifest_bytes(self, result: CleaningResult) -> bytes:
         generated_at = self._now_utc()
         if generated_at.tzinfo is None:
             raise DocumentCleaningError(
@@ -268,7 +329,30 @@ class MarkdownDocumentCleaner:
             "scanned_count": result.scanned_count,
             "cleaned_count": result.cleaned_count,
             "skipped_count": result.skipped_count,
+            "invalid_count": result.invalid_count,
+            "empty_count": result.empty_count,
+            "error_count": result.error_count,
             "warning_count": result.warning_count,
+            "extension_mapping": {".md": ".md", ".mdx": ".md"},
+            "configuration": {
+                "strict": self.config.strict,
+                "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
+                "cleaner_schema_version": CLEANING_SCHEMA_VERSION,
+            },
+            "skipped_or_error_files": [
+                {
+                    "source_relative_path": item.source_relative_path,
+                    "status": item.status,
+                    "reason": (
+                        item.error
+                        or "Output content was unchanged."
+                        if item.status == "SKIP"
+                        else item.error
+                    ),
+                }
+                for item in result.files
+                if item.status in {"SKIP", "EMPTY", "INVALID"}
+            ],
             "files": [
                 {
                     "source_relative_path": item.source_relative_path,
@@ -283,15 +367,169 @@ class MarkdownDocumentCleaner:
                     "transformations": list(item.transformations),
                     "warnings": list(item.warnings),
                     "status": item.status,
+                    "error": item.error,
                 }
                 for item in result.files
             ],
         }
-        data = (
+        return (
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
             + "\n"
         ).encode("utf-8")
-        atomic_write_bytes(output_root / CLEANING_MANIFEST_NAME, data)
+
+
+def _invalid_file_result(
+    relative: Path,
+    destination_relative: Path,
+    source: Path,
+    error: str,
+) -> CleanedFileResult:
+    try:
+        source_bytes = source.read_bytes()
+    except OSError:
+        source_bytes = b""
+    return CleanedFileResult(
+        source_relative_path=relative.as_posix(),
+        destination_relative_path=destination_relative.as_posix(),
+        input_extension=source.suffix.casefold(),
+        source_sha256=hashlib.sha256(source_bytes).hexdigest()
+        if source_bytes
+        else "",
+        output_sha256="",
+        source_size_bytes=len(source_bytes),
+        output_size_bytes=0,
+        title="",
+        front_matter={},
+        transformations=(),
+        warnings=(error,),
+        status="INVALID",
+        error=error,
+    )
+
+
+def _source_syntax_error(
+    source_relative_path: str,
+    error: CleaningSyntaxError,
+) -> CleaningSyntaxError:
+    return CleaningSyntaxError(
+        f"CleaningSyntaxError in '{source_relative_path}': {error}"
+    )
+
+
+def _publish_cleaned_dataset(
+    output_root: Path,
+    prepared_outputs: Sequence[tuple[CleanedFileResult, bytes]],
+    manifest: bytes,
+) -> None:
+    """Publish a complete dataset through a validated sibling directory."""
+    parent = output_root.parent
+    temporary: Path | None = None
+    backup: Path | None = None
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(
+            tempfile.mkdtemp(
+                prefix=f".{output_root.name}.cleaning-tmp-",
+                dir=parent,
+            )
+        ).resolve()
+        for result, content in prepared_outputs:
+            atomic_write_bytes(
+                temporary / result.destination_relative_path,
+                content,
+            )
+        atomic_write_bytes(
+            temporary / CLEANING_MANIFEST_NAME,
+            manifest,
+        )
+        _validate_staged_dataset(
+            temporary,
+            expected_count=len(prepared_outputs),
+        )
+
+        if output_root.exists():
+            backup = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{output_root.name}.cleaning-backup-",
+                    dir=parent,
+                )
+            ).resolve()
+            backup.rmdir()
+            os.replace(output_root, backup)
+        try:
+            os.replace(temporary, output_root)
+        except OSError:
+            if (
+                backup is not None
+                and backup.exists()
+                and not output_root.exists()
+            ):
+                os.replace(backup, output_root)
+                backup = None
+            raise
+        temporary = None
+        if backup is not None:
+            _remove_staging_directory(backup, parent)
+            backup = None
+    except DocumentCleaningError:
+        raise
+    except OSError as exc:
+        raise CleaningWriteError(
+            f"Could not safely publish cleaned dataset to '{output_root}'."
+        ) from exc
+    finally:
+        if temporary is not None and temporary.exists():
+            _remove_staging_directory(temporary, parent)
+        if backup is not None and backup.exists():
+            if not output_root.exists():
+                os.replace(backup, output_root)
+            else:
+                _remove_staging_directory(backup, parent)
+
+
+def _validate_staged_dataset(
+    directory: Path,
+    *,
+    expected_count: int,
+) -> None:
+    manifest_path = directory / CLEANING_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise CleaningWriteError(
+            "Staged cleaning dataset is missing its manifest."
+        )
+    try:
+        metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CleaningWriteError(
+            "Staged cleaning manifest could not be validated."
+        ) from exc
+    if metadata.get("schema_version") != CLEANING_SCHEMA_VERSION:
+        raise CleaningWriteError(
+            "Staged cleaning manifest has an incompatible schema version."
+        )
+    documents = tuple(
+        path
+        for path in directory.rglob("*.md")
+        if path.name != CLEANING_MANIFEST_NAME
+    )
+    if len(documents) != expected_count:
+        raise CleaningWriteError(
+            "Staged cleaning document count does not match the manifest: "
+            f"expected {expected_count}, found {len(documents)}."
+        )
+
+
+def _remove_staging_directory(path: Path, expected_parent: Path) -> None:
+    resolved = path.resolve()
+    parent = expected_parent.resolve()
+    if resolved.parent != parent or not (
+        ".cleaning-tmp-" in resolved.name
+        or ".cleaning-backup-" in resolved.name
+    ):
+        raise CleaningWriteError(
+            f"Refusing to remove unsafe cleaning staging path: '{resolved}'."
+        )
+    shutil.rmtree(resolved)
 
 
 def validate_cleaning_paths(
@@ -307,6 +545,10 @@ def validate_cleaning_paths(
     if not input_dir.is_dir():
         raise CleaningPathError(
             f"Input path is not a directory: '{input_dir}'."
+        )
+    if output_dir.exists() and not output_dir.is_dir():
+        raise CleaningPathError(
+            f"Output path is not a directory: '{output_dir}'."
         )
     try:
         source = input_dir.resolve(strict=True)
@@ -401,7 +643,10 @@ def clean_markdown_text(
     transformations: list[str] = []
     warnings: list[str] = []
     text = normalize_newlines(source_text)
-    body, front_matter, front_warnings = parse_front_matter(text)
+    try:
+        body, front_matter, front_warnings = parse_front_matter(text)
+    except CleaningSyntaxError as exc:
+        raise _source_syntax_error(source_relative_path, exc) from exc
     if front_matter:
         transformations.append("front_matter_extracted")
     warnings.extend(front_warnings)
@@ -410,7 +655,10 @@ def clean_markdown_text(
     )
     if code_group_count:
         transformations.append("component:CodeGroup")
-    protected, fenced = protect_fenced_code(body)
+    try:
+        protected, fenced = protect_fenced_code(body)
+    except CleaningSyntaxError as exc:
+        raise _source_syntax_error(source_relative_path, exc) from exc
     protected, inline = protect_inline_code(protected)
     protected, removed_modules, module_warnings = remove_mdx_modules(protected)
     if removed_modules:
@@ -424,9 +672,8 @@ def clean_markdown_text(
     )
     warnings.extend(component_warnings)
     protected = normalize_markdown_whitespace(protected)
-    body = restore_protected_regions(protected, inline, fenced)
-    body = normalize_markdown_whitespace(body)
-    existing_h1 = H1_PATTERN.search(body)
+    heading_view = restore_protected_regions(protected, inline, {})
+    existing_h1 = H1_PATTERN.search(heading_view)
     front_title = front_matter.get("title")
     title = (
         existing_h1.group(1).strip()
@@ -441,7 +688,8 @@ def clean_markdown_text(
             transformations.append("fallback_title_added")
         else:
             transformations.append("front_matter_title_added")
-        body = f"# {title}\n\n{body.lstrip()}"
+        protected = f"# {title}\n\n{protected.lstrip()}"
+    body = restore_protected_regions(protected, inline, fenced)
     header = (
         "<!--\n"
         f"source_name: {source_name.strip()}\n"
@@ -526,13 +774,13 @@ def protect_fenced_code(text: str) -> tuple[str, dict[str, str]]:
         closed = False
         while index < len(lines):
             block.append(lines[index])
-            candidate = lines[index].strip()
+            candidate = lines[index].rstrip("\n")
             index += 1
-            if (
-                candidate
-                and set(candidate) == {fence[0]}
-                and len(candidate) >= len(fence)
-            ):
+            closing_pattern = re.compile(
+                rf"^ {{0,3}}{re.escape(fence[0])}"
+                rf"{{{len(fence)},}}[ \t]*$"
+            )
+            if closing_pattern.match(candidate):
                 closed = True
                 break
         if not closed:
