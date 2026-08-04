@@ -34,6 +34,7 @@ class Settings:
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_chat_model: str = "llama3.2"
     ollama_timeout_seconds: float = 30.0
+    ollama_embedding_batch_size: int = 32
 
     @property
     def gemini_chat_model(self) -> str:
@@ -134,4 +135,7 @@ def load_settings(*, env_file: Path | None = None, load_env_file: bool = True) -
         ollama_embedding_model=_optional_text_setting("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
         ollama_chat_model=_optional_text_setting("OLLAMA_CHAT_MODEL", "llama3.2"),
         ollama_timeout_seconds=_positive_float_setting("OLLAMA_TIMEOUT_SECONDS", 30.0),
+        ollama_embedding_batch_size=_integer_setting(
+            "OLLAMA_EMBEDDING_BATCH_SIZE", 32, minimum=1
+        ),
     )

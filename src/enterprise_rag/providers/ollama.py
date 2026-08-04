@@ -40,7 +40,11 @@ class UrllibJsonTransport:
                 status = getattr(response, "status", response.getcode())
                 raw = response.read()
         except error.HTTPError as exc:
-            raise OllamaHTTPError(f"Ollama returned HTTP status {exc.code} for {url}.") from exc
+            detail = _http_error_detail(exc, payload)
+            suffix = f" Error: {detail}" if detail else ""
+            raise OllamaHTTPError(
+                f"Ollama returned HTTP status {exc.code} for {url}.{suffix}"
+            ) from exc
         except (socket.timeout, TimeoutError) as exc:
             raise OllamaTimeoutError(f"Ollama request timed out after {timeout} seconds: {url}.") from exc
         except error.URLError as exc:
@@ -54,29 +58,81 @@ class UrllibJsonTransport:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise OllamaResponseError(f"Ollama returned invalid JSON from {url}.") from exc
 
+def _http_error_detail(
+    exc: error.HTTPError,
+    payload: Mapping[str, Any],
+    *,
+    maximum_length: int = 200,
+) -> str | None:
+    """Extract a short Ollama error without exposing request text or payloads."""
+    try:
+        raw = exc.read()
+        parsed = json.loads(raw.decode("utf-8"))
+    except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("error"), str):
+        return None
+
+    detail = " ".join(parsed["error"].split())
+    sensitive_values: list[str] = []
+    for key in ("input", "prompt"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            sensitive_values.append(value)
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            sensitive_values.extend(item for item in value if isinstance(item, str))
+    for sensitive in sorted(sensitive_values, key=len, reverse=True):
+        if sensitive:
+            detail = detail.replace(sensitive, "[redacted input]")
+    if not detail:
+        return None
+    if len(detail) > maximum_length:
+        return detail[: maximum_length - 3].rstrip() + "..."
+    return detail
+
+
 class OllamaEmbeddingClient:
     def __init__(
-        self, *, base_url: str, model: str, timeout: float, transport: JsonTransport | None = None
+        self,
+        *,
+        base_url: str,
+        model: str,
+        timeout: float,
+        batch_size: int = 32,
+        transport: JsonTransport | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("OLLAMA_EMBEDDING_MODEL must not be empty.")
         if timeout <= 0:
             raise ValueError("Ollama timeout must be greater than 0.")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("Ollama embedding batch size must be a positive integer.")
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.batch_size = batch_size
         self._transport = transport or UrllibJsonTransport()
 
     def embed(self, *, model: str, contents: Sequence[str]) -> Sequence[Sequence[float]]:
-        result = self._transport.post_json(
-            f"{self.base_url}/api/embed",
-            {"model": model, "input": list(contents)},
-            self.timeout,
-        )
+        vectors: list[tuple[float, ...]] = []
+        for start in range(0, len(contents), self.batch_size):
+            batch = contents[start : start + self.batch_size]
+            result = self._transport.post_json(
+                f"{self.base_url}/api/embed",
+                {"model": model, "input": list(batch)},
+                self.timeout,
+            )
+            vectors.extend(self._validate_batch(result, expected_count=len(batch)))
+        return validate_embedding_vectors(vectors, expected_count=len(contents))
+
+    @staticmethod
+    def _validate_batch(result: Any, *, expected_count: int) -> tuple[tuple[float, ...], ...]:
         if not isinstance(result, dict) or not isinstance(result.get("embeddings"), list):
             raise OllamaResponseError("Ollama embedding response must contain an embeddings array.")
         try:
-            return validate_embedding_vectors(result["embeddings"], expected_count=len(contents))
+            return validate_embedding_vectors(
+                result["embeddings"], expected_count=expected_count
+            )
         except (TypeError, ValueError, EmbeddingValidationError) as exc:
             if isinstance(exc, EmbeddingValidationError):
                 raise

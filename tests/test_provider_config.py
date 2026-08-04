@@ -7,7 +7,8 @@ from enterprise_rag.providers.ollama import OllamaEmbeddingClient
 
 PROVIDER_ENV = (
     "EMBEDDING_PROVIDER", "GENERATION_PROVIDER", "OLLAMA_BASE_URL",
-    "OLLAMA_EMBEDDING_MODEL", "OLLAMA_CHAT_MODEL", "OLLAMA_TIMEOUT_SECONDS",
+    "OLLAMA_EMBEDDING_MODEL", "OLLAMA_EMBEDDING_BATCH_SIZE",
+    "OLLAMA_CHAT_MODEL", "OLLAMA_TIMEOUT_SECONDS",
     "GEMINI_API_KEY", "GEMINI_CHAT_MODEL", "GEMINI_GENERATION_MODEL",
 )
 
@@ -55,3 +56,15 @@ def test_gemini_chat_model_supports_new_and_legacy_names(monkeypatch):
     assert load_settings(load_env_file=False).generation_model == "legacy"
     monkeypatch.setenv("GEMINI_CHAT_MODEL", "new-name")
     assert load_settings(load_env_file=False).gemini_chat_model == "new-name"
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
+def test_embedding_batch_size_must_be_positive_integer(monkeypatch, value):
+    clear(monkeypatch)
+    monkeypatch.setenv("OLLAMA_EMBEDDING_BATCH_SIZE", value)
+    with pytest.raises(ConfigurationError, match="OLLAMA_EMBEDDING_BATCH_SIZE"):
+        load_settings(load_env_file=False)
+
+def test_embedding_batch_size_defaults_to_32_and_is_configurable(monkeypatch):
+    clear(monkeypatch)
+    assert load_settings(load_env_file=False).ollama_embedding_batch_size == 32
+    monkeypatch.setenv("OLLAMA_EMBEDDING_BATCH_SIZE", "64")
+    assert load_settings(load_env_file=False).ollama_embedding_batch_size == 64

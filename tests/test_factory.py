@@ -44,3 +44,9 @@ def test_unsupported_embedding_provider_fails():
 def test_unsupported_generation_provider_fails():
     with pytest.raises(ConfigurationError, match="Unsupported generation"):
         create_generation_client(settings(generation_provider="bad"))
+def test_ollama_embedding_factory_passes_batch_size():
+    client = create_embedding_client(
+        settings(embedding_provider="ollama", ollama_embedding_batch_size=17)
+    )
+    assert isinstance(client, OllamaEmbeddingClient)
+    assert client.batch_size == 17

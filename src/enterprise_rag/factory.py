@@ -15,6 +15,7 @@ def create_embedding_client(settings: Settings) -> EmbeddingClient:
             base_url=settings.ollama_base_url,
             model=settings.ollama_embedding_model,
             timeout=settings.ollama_timeout_seconds,
+            batch_size=settings.ollama_embedding_batch_size,
         )
     raise ConfigurationError(f"Unsupported embedding provider: {settings.embedding_provider!r}.")
 

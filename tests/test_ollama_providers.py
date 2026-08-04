@@ -70,6 +70,7 @@ class FakeResponse:
     def __enter__(self): return self
     def __exit__(self,*args): return False
     def read(self): return self.body
+    def close(self): pass
     def getcode(self): return self.status
 
 def test_transport_rejects_invalid_json(monkeypatch):
@@ -110,3 +111,103 @@ def test_ollama_generation_surfaces_invalid_json_transport_error():
     )
     with pytest.raises(OllamaResponseError, match="invalid JSON"):
         client.generate("prompt")
+class SequentialEmbeddingTransport:
+    def __init__(self):
+        self.calls = []
+
+    def post_json(self, url, payload, timeout):
+        self.calls.append((url, payload, timeout))
+        return {
+            "embeddings": [
+                [float(text.removeprefix("text-")), 1.0]
+                for text in payload["input"]
+            ]
+        }
+
+@pytest.mark.parametrize("count,expected_batches", [(1, 1), (32, 1), (33, 2), (65, 3)])
+def test_ollama_embedding_batches_preserve_input_and_vector_order(count, expected_batches):
+    transport = SequentialEmbeddingTransport()
+    client = OllamaEmbeddingClient(
+        base_url="http://localhost:11434",
+        model="embed-model",
+        timeout=2,
+        batch_size=32,
+        transport=transport,
+    )
+    texts = [f"text-{index}" for index in range(count)]
+    vectors = client.embed_documents(texts)
+    assert len(transport.calls) == expected_batches
+    assert [
+        item for _, payload, _ in transport.calls for item in payload["input"]
+    ] == texts
+    assert vectors == tuple((float(index), 1.0) for index in range(count))
+
+def test_ollama_embedding_rejects_batch_count_mismatch():
+    client, _ = embedding_client({"embeddings": [[1.0]]})
+    with pytest.raises(EmbeddingValidationError, match="count does not match"):
+        client.embed_documents(["a", "b"])
+
+def test_ollama_embedding_rejects_dimensions_inconsistent_across_batches():
+    class DimensionTransport:
+        def __init__(self): self.calls = 0
+        def post_json(self, url, payload, timeout):
+            self.calls += 1
+            dimension = 2 if self.calls == 1 else 3
+            return {"embeddings": [[0.0] * dimension for _ in payload["input"]]}
+    client = OllamaEmbeddingClient(
+        base_url="http://local", model="m", timeout=1, batch_size=2,
+        transport=DimensionTransport(),
+    )
+    with pytest.raises(EmbeddingValidationError, match="inconsistent"):
+        client.embed_documents(["a", "b", "c"])
+
+def test_ollama_embedding_stops_on_middle_batch_http_failure():
+    class FailingTransport:
+        def __init__(self): self.calls = 0
+        def post_json(self, url, payload, timeout):
+            self.calls += 1
+            if self.calls == 2:
+                raise OllamaHTTPError("batch failed")
+            return {"embeddings": [[1.0] for _ in payload["input"]]}
+    transport = FailingTransport()
+    client = OllamaEmbeddingClient(
+        base_url="http://local", model="m", timeout=1, batch_size=2,
+        transport=transport,
+    )
+    with pytest.raises(OllamaHTTPError, match="batch failed"):
+        client.embed_documents(["a", "b", "c", "d", "e"])
+    assert transport.calls == 2
+
+@pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
+def test_ollama_embedding_rejects_invalid_batch_size(batch_size):
+    with pytest.raises(ValueError, match="positive integer"):
+        OllamaEmbeddingClient(
+            base_url="http://local", model="m", timeout=1, batch_size=batch_size
+        )
+
+def test_transport_includes_safe_json_http_error_without_payload(monkeypatch):
+    secret_document = "private enterprise document contents"
+    body = json.dumps({"error": f"batch rejected: {secret_document}"}).encode()
+    def fail(*args, **kwargs):
+        raise error.HTTPError("url", 400, "bad request", None, FakeResponse(body))
+    monkeypatch.setattr("enterprise_rag.providers.ollama.request.urlopen", fail)
+    with pytest.raises(OllamaHTTPError) as raised:
+        UrllibJsonTransport().post_json(
+            "http://local/api/embed",
+            {"model": "m", "input": [secret_document]},
+            1,
+        )
+    message = str(raised.value)
+    assert "batch rejected" in message
+    assert "[redacted input]" in message
+    assert secret_document not in message
+
+def test_transport_truncates_long_json_http_error(monkeypatch):
+    body = json.dumps({"error": "x" * 500}).encode()
+    def fail(*args, **kwargs):
+        raise error.HTTPError("url", 400, "bad request", None, FakeResponse(body))
+    monkeypatch.setattr("enterprise_rag.providers.ollama.request.urlopen", fail)
+    with pytest.raises(OllamaHTTPError) as raised:
+        UrllibJsonTransport().post_json("http://local/api/embed", {}, 1)
+    assert len(str(raised.value)) < 300
+    assert str(raised.value).endswith("...")
