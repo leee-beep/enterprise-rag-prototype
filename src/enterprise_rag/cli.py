@@ -263,18 +263,26 @@ def main(
         results = balanced.retrieve(
             question, args.companies, args.top_k_per_company
         )
-        for result in results:
-            retrieval = result.retrieval_result
-            chunk = retrieval.embedded_chunk.chunk
-            metadata = retrieval.metadata
-            preview = " ".join(chunk.content.split())[:300]
-            print(f"\n{result.company_name} Rank {result.company_rank}", file=output)
-            print(f"Score: {retrieval.score:.6f}", file=output)
-            print(f"Title: {metadata.get('title', chunk.file_name)}", file=output)
-            print(f"Year: {metadata.get('fiscal_year', 'unknown')}", file=output)
-            print(f"Page: {metadata.get('page_number', 'unknown')}", file=output)
-            print(f"Chunk ID: {chunk.chunk_id}", file=output)
-            print(f"Preview: {preview}", file=output)
+        for group in results.company_evidence:
+            print(f"\n{group.company_name}", file=output)
+            print(f"Requested: {group.requested_count}", file=output)
+            print(f"Returned: {group.returned_count}", file=output)
+            if group.insufficient_evidence:
+                print("Warning: insufficient usable evidence", file=output)
+            for result in group.evidence:
+                retrieval = result.retrieval_result
+                chunk = retrieval.embedded_chunk.chunk
+                metadata = retrieval.metadata
+                preview = " ".join(chunk.content.split())[:300]
+                print(f"\nRank {result.company_rank}", file=output)
+                print(f"Original candidate rank: {result.original_candidate_rank}", file=output)
+                print(f"Score: {retrieval.score:.6f}", file=output)
+                print(f"Quality: usable ({result.quality_score:.2f})", file=output)
+                print(f"Title: {metadata.get('title', chunk.file_name)}", file=output)
+                print(f"Year: {metadata.get('fiscal_year', 'unknown')}", file=output)
+                print(f"Page: {metadata.get('page_number', 'unknown')}", file=output)
+                print(f"Chunk ID: {chunk.chunk_id}", file=output)
+                print(f"Preview: {preview}", file=output)
         return 0
     raise CLIConfigurationError(f"Unsupported command: {args.command!r}.")
 
