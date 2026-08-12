@@ -19,6 +19,8 @@ from enterprise_rag.retrieval import QueryEmbeddingClient, Retriever
 from enterprise_rag.generation import GenerationClient, generate_prompt
 from enterprise_rag.pipeline import RAGPipeline
 from enterprise_rag.vector_store import FaissVectorStore, VectorStoreError
+from enterprise_rag.competitor_retrieval import BalancedCompetitorRetriever
+from enterprise_rag.retrieval import RetrievalError
 
 class CLIConfigurationError(RuntimeError):
     """Raised when a command requires an application dependency not yet available."""
@@ -64,6 +66,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Show indexing progress.",
+    )
+    competitor = subcommands.add_parser(
+        "competitor-retrieve",
+        help="Retrieve equally from separate private competitor indexes.",
+    )
+    competitor.add_argument("question", nargs="?", help="Comparison question to retrieve.")
+    competitor.add_argument(
+        "--companies", nargs="+", required=True,
+        help="Company IDs in deterministic output order: gigabyte, asus, msi.",
+    )
+    competitor.add_argument("--top-k-per-company", type=int, default=2)
+    competitor.add_argument(
+        "--index-root", type=Path, default=Path("data/vector_store/competitors")
     )
     return parser
 
@@ -238,6 +253,29 @@ def main(
             verbose=args.verbose,
             output=output,
         )
+    if args.command == "competitor-retrieve":
+        settings = load_settings()
+        question = args.question if args.question is not None else input("Question: ")
+        client = query_embedding_client or create_embedding_client(settings)
+        balanced = BalancedCompetitorRetriever.from_index_root(
+            args.index_root, settings, client
+        )
+        results = balanced.retrieve(
+            question, args.companies, args.top_k_per_company
+        )
+        for result in results:
+            retrieval = result.retrieval_result
+            chunk = retrieval.embedded_chunk.chunk
+            metadata = retrieval.metadata
+            preview = " ".join(chunk.content.split())[:300]
+            print(f"\n{result.company_name} Rank {result.company_rank}", file=output)
+            print(f"Score: {retrieval.score:.6f}", file=output)
+            print(f"Title: {metadata.get('title', chunk.file_name)}", file=output)
+            print(f"Year: {metadata.get('fiscal_year', 'unknown')}", file=output)
+            print(f"Page: {metadata.get('page_number', 'unknown')}", file=output)
+            print(f"Chunk ID: {chunk.chunk_id}", file=output)
+            print(f"Preview: {preview}", file=output)
+        return 0
     raise CLIConfigurationError(f"Unsupported command: {args.command!r}.")
 
 def run_cli(
@@ -270,6 +308,7 @@ def run_cli(
         IndexingError,
         EmbeddingError,
         VectorStoreError,
+        RetrievalError,
     ) as exc:
         print(f"Error: {exc}", file=error_output)
         return 2
