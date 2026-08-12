@@ -1,109 +1,190 @@
-# Enterprise RAG Prototype
+# Competitor Intelligence RAG Prototype
 
-A local-first, modular Retrieval-Augmented Generation engineering prototype.
+Built on a modular, privacy-first enterprise RAG foundation.
 
-## Current Status
+This repository contains a local-first RAG engineering prototype for retrieving and comparing evidence from official corporate disclosures from:
 
-The repository implements document ingestion, chunking, provider-selectable
-embeddings, FAISS vector search and persistence, provider-independent retrieval,
-and a one-shot RAG question-answering pipeline. The application can now build
-a persisted index from local documents and requires explicitly configured
-model providers for real embedding or generation calls.
+- Gigabyte (2376)
+- ASUS (2357)
+- MSI (2377)
 
-### Completed
+The current competitor workflow performs page-aware PDF ingestion, builds a separate local FAISS index for each company, and returns balanced evidence with company, year, page, and chunk provenance. It stops at retrieval: competitor-specific answer synthesis and user-facing citations are not implemented yet.
 
-- Standard Python `src` layout and editable installation
-- Environment-based configuration with delayed Gemini API-key validation
-- Recursive TXT and Markdown ingestion
-- Deterministic local Markdown/MDX document import with a versioned manifest
+The Git repository remains named `enterprise-rag-prototype` because the competitor application is built on a reusable generic RAG backend.
+
+## Current status
+
+### Implemented and validated
+
+- Recursive TXT and Markdown loading
 - Configurable JSON and JSONL structured extraction
-- Deterministic character-based chunking with metadata preservation
-- Provider-neutral `EmbeddingClient` and `GenerationClient` interfaces
-- Gemini embedding and generation adapters
-- Ollama embedding and non-streaming generation adapters
-- Independent embedding and generation provider selection
-- Shared empty-vector, finite-number, dimension, and generated-text validation
-- In-memory FAISS `IndexFlatL2` build and scored search
-- Versioned FAISS index and chunk-metadata persistence
-- Provider-independent `Retriever` with Top-K results and normalized metadata
-- Context formatting, prompt construction, and one-shot `RAGPipeline`
-- Runnable `build-index`, persisted-index `ask`, and provider-level CLI commands
-- Fully offline tests with fake SDK clients and HTTP transports
+- Deterministic Markdown/MDX import and cleaning
+- Deterministic structure-aware chunking with stable chunk identities
+- Provider-neutral Gemini and Ollama embedding/generation abstractions
+- Bounded Ollama embedding batches
+- Generic Gemini/Ollama generation and one-shot `RAGPipeline`
+- FAISS `IndexFlatL2` construction, scored search, persistence, and reload
+- Page-aware competitor PDF ingestion with extraction-quality checks
+- AES-compatible empty-password PDF loading and password-required PDF rejection
+- Competitor metadata, SHA-256 validation, and stable source/page/chunk identities
+- Read-only competitor PDF preflight: 12 of 12 real PDFs passed
+- Separate 2025 ASUS, Gigabyte, and MSI FAISS indexes
+- Balanced one-, two-, and three-company retrieval with equal Top-K allocation
+- Company-local relevance scores and deterministic company grouping
+- Retrieval provenance: company, ticker, year, document, PDF page, source ID, and chunk ID
+- `competitor-retrieve` diagnostic CLI
+- 326 passing offline tests
+- Private PDFs, manifests, extracted text, and generated indexes excluded from Git
 
-### Not Yet Implemented
+### Not yet implemented
 
-- PDF ingestion
-- Automated index rebuilding and lifecycle management
-- Source citations
-- Retrieval and answer-quality evaluation
-- API or UI
-- Live Gemini and Ollama integration tests
+- Competitor-specific Qwen comparison synthesis
+- User-facing citations or citation verification
+- Evidence-quality filtering and deduplication
+- `financial_facts.csv` or structured financial comparison
+- 2024 competitor indexes
+- Qualitative indexing of consolidated financial reports
+- Query translation, reranking, or hybrid/BM25 retrieval
+- Streamlit or another user interface
+- OCR
+- Production access controls and operational hardening
 
-## Current Data Flow
+## Validated source scope
+
+The private local source collection contains official 2024 and 2025 annual reports and consolidated financial reports for all three companies. All 12 PDFs passed real extraction preflight.
+
+The current qualitative indexes contain **only**:
+
+- ASUS 2025 Annual Report
+- Gigabyte 2025 Annual Report
+- MSI 2025 Annual Report
+
+The other nine PDFs are not embedded. Consolidated financial reports are retained primarily as authoritative sources for a future structured financial-facts layer.
+
+### Validation results
+
+| Validation | Result |
+|---|---:|
+| Real PDF preflight | 12 / 12 passed |
+| ASUS 2025 index | 461 chunks |
+| Gigabyte 2025 index | 1,149 chunks |
+| MSI 2025 index | 326 chunks |
+| Total indexed chunks | 1,936 |
+| Automated test suite | 326 passed |
+
+Real local Ollama indexing and retrieval were manually validated with `nomic-embed-text`. Automated provider tests remain offline and use fake clients or transports; they do not call Ollama, Gemini, localhost, or external networks.
+
+## Competitor architecture
 
 ```text
-External Markdown / MDX
-        → Document Import
-        → data/raw_documents/
-        → Document Cleaning
-        → data/documents/
+Official competitor PDFs
+        |
+        v
+Private source manifest
+        |
+        v
+Metadata + SHA-256 validation
+        |
+        v
+Page-aware PDF loading
+        |
+        v
+LoadedDocument per extractable page
+        |
+        v
+Structure-aware chunking
+        |
+        v
+Local Ollama embedding
+(nomic-embed-text)
+        |
+        v
+Separate FAISS indexes
+ +-----------+-----------+-----------+
+ | ASUS 2025 | GIGABYTE  | MSI 2025  |
+ +-----------+-----------+-----------+
+        |
+        v
+BalancedCompetitorRetriever
+(equal Top-K per company)
+        |
+        v
+Company-grouped retrieval evidence
+(company / year / page / chunk / local score)
 
-TXT / MD / JSON / JSONL
-        → LoadedDocument
-        → DocumentChunk
-        → Selected Embedding Provider (Gemini or Ollama)
-        → EmbeddedChunk
-        → In-memory FAISS
-        → Persisted FAISS index and build manifest
-        → Ask
-        → Retrieval
-        → Generation
+CURRENT SYSTEM STOPS HERE
+
+        |
+        v
+Planned:
+Evidence filtering
+Citation-ready context
+Qwen competitor synthesis
+Financial comparison
+User interface
 ```
 
-The one-shot RAG pipeline connects retrieval to generation. It does not add
-citations, memory, streaming, reranking, or multi-turn chat.
+## Balanced multi-company retrieval
 
-## Provider Architecture
+Each selected company is searched independently against its own index. For:
 
 ```text
-embeddings.py              generation.py
-EmbeddingClient            GenerationClient
-       ↓                           ↓
-factory.create_*_client(Settings)
-       ↓                           ↓
-Gemini adapter             Ollama adapter
+--companies gigabyte asus msi
+--top-k-per-company 2
 ```
 
-Configure providers independently in `.env`:
+the result order is deterministic:
 
-```dotenv
-EMBEDDING_PROVIDER=gemini
-GENERATION_PROVIDER=ollama
+```text
+Gigabyte: Rank 1, Rank 2
+ASUS:     Rank 1, Rank 2
+MSI:      Rank 1, Rank 2
 ```
 
-Supported combinations:
+This prevents one company's corpus from consuming the entire Top-K. Raw FAISS-derived scores remain local to each company index and are not globally sorted or treated as calibrated across indexes.
 
-- Gemini embedding + Gemini generation
-- Ollama embedding + Ollama generation
-- Ollama embedding + Gemini generation
-- Gemini embedding + Ollama generation
+### Competitor retrieval CLI
 
-Only the selected provider is called for an operation. The application does not automatically call both providers and never silently falls back to another provider.
+The diagnostic command loads existing company indexes and returns retrieved evidence:
 
-### Index Compatibility Rule
+```powershell
+python -m enterprise_rag competitor-retrieve `
+  --index-root data\vector_store\competitors `
+  --companies gigabyte asus msi `
+  --top-k-per-company 2 `
+  "Compare the companies' AI strategies."
+```
 
-Document embeddings used to build a FAISS index and query embeddings used to
-search it must use the same embedding provider, model, and vector space.
-Generation is independent and can use either provider. New indexes include a
-versioned `index_manifest.json`; `ask` rejects a provider/model mismatch before
-querying. Legacy indexes without this manifest remain loadable but cannot
-receive that compatibility check.
+It prints company, company-local rank and score, source title, year, PDF page, chunk ID, and a short preview. It does **not** generate a competitor comparison answer.
 
-### Ollama Setup
+Example retrieval questions:
 
-Ollama must be installed, started, and supplied with the configured models by the user. This project does not download models or start the Ollama service. The adapters use the local HTTP API at `OLLAMA_BASE_URL` and default to `http://localhost:11434`.
+- Compare Gigabyte, ASUS and MSI's AI strategies.
+- What does each company identify as a major growth driver?
+- Compare the companies' enterprise or server strategies.
+- What products or business areas does each company emphasize?
+- What does MSI say about AI servers?
+- What does Gigabyte say about AI infrastructure?
+- What does ASUS say about AI PCs?
 
-## Local Setup
+Broad English comparison queries against zh-TW reports remain experimental and do not always return equally strong evidence.
+
+## Privacy and data handling
+
+- Real competitor PDFs remain local.
+- The private source manifest remains local.
+- Extracted page text remains local.
+- Generated competitor FAISS indexes remain local.
+- `data/private/` and `data/vector_store/` are Git-ignored.
+- The repository contains code and synthetic or fictional test fixtures, not the real competitor corpus.
+
+The validated competitor workflow uses Ollama. If `OLLAMA_BASE_URL` points to a trusted local or organization-controlled service, document chunks, queries, and retrieved context remain within that environment. Ollama is not inherently private when configured to use an untrusted remote endpoint.
+
+Gemini remains an optional provider for the reusable generic RAG foundation. Selecting Gemini sends the relevant content to an external service and must follow organizational data-handling policy.
+
+## Local setup
+
+Create a virtual environment, install the editable project and copy the configuration template:
 
 ```powershell
 python -m venv .venv
@@ -112,100 +193,129 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Runtime and test dependencies are declared in `pyproject.toml`; `requirements.txt` performs an editable development install. A Gemini key is checked only immediately before a real Gemini operation. Ollama operations never require a Gemini key.
+`pyproject.toml` is the dependency source of truth; `requirements.txt` installs the project and test extras in editable mode.
 
-## Running Tests
+### Provider configuration
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest --basetemp=<writable-temp-directory> -p no:cacheprovider
+Embedding and generation providers are selected independently in `.env`:
+
+```dotenv
+EMBEDDING_PROVIDER=ollama
+GENERATION_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_EMBEDDING_BATCH_SIZE=32
+OLLAMA_CHAT_MODEL=qwen3:8b
+OLLAMA_TIMEOUT_SECONDS=180
 ```
 
-Provider tests inject fake SDK clients or HTTP transports. They do not call Gemini, localhost, Ollama, or any external network.
+Ollama and the configured models must be installed and started separately by the user. This project does not download models or start the service.
 
-## Build Index
+Gemini can be selected for the generic foundation. `GEMINI_API_KEY` is validated only before a real Gemini operation; Ollama operations do not require it. Never commit `.env`.
 
-The standalone indexing service reads cleaned documents, chunks them, calls the
-configured embedding provider, builds an in-memory FAISS `IndexFlatL2`, and
-safely publishes the persisted index. Defaults come from `DOCUMENTS_DIR` and
-`VECTOR_STORE_DIR` in `.env`:
+### Run tests
 
 ```powershell
-python -m enterprise_rag build-index
+.\.venv\Scripts\python.exe -m pytest `
+  --basetemp=C:\tmp\enterprise-rag-tests `
+  -p no:cacheprovider `
+  -ra
 ```
 
-Paths can be overridden explicitly:
+## Competitor data setup
 
-```powershell
-python -m enterprise_rag build-index `
-  --input data\documents `
-  --output data\vector_store `
-  --verbose
-```
-
-If the output directory already exists, the command stops without modifying
-it. Review the path and explicitly request replacement:
-
-```powershell
-python -m enterprise_rag build-index `
-  --input data\documents `
-  --output data\vector_store `
-  --overwrite `
-  --verbose
-```
-
-Index creation happens in a sibling temporary directory. Only a complete,
-reloadable FAISS index, metadata file, and build manifest replace the final
-directory. A failed build does not delete the previous index.
-
-Gemini indexing requires `GEMINI_API_KEY` and sends document chunks to the
-configured Gemini embedding model. Ollama indexing requires the configured
-local Ollama service and embedding model to already be available. The project
-does not download models, start Ollama, or silently switch providers.
-
-Successful output includes:
+Expected private layout:
 
 ```text
-Documents loaded: ...
-Chunks created: ...
-Vectors embedded: ...
-Embedding dimension: ...
-Index saved to: ...
+data/private/competitors/
+    source_manifest.json
+    sources/
+        asus/
+            2025/
+        gigabyte/
+            2025/
+        msi/
+            2025/
 ```
 
-The generated `index_manifest.json` records its schema version, build time,
-source identifier, embedding provider/model/dimension, chunk settings,
-document count, and chunk count. Generated indexes under `data/vector_store/`
-are local artifacts and are ignored by Git.
+The manifest supplies validated company, year, document type, language, official source URL, and safe relative source path metadata. Private source data is intentionally excluded from Git.
 
-After building an index, ask a one-shot question with the same embedding
-provider and model:
+Run the read-only preflight before indexing:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\preflight_competitor_pdfs.py `
+  --source-root data\private\competitors\sources `
+  --manifest data\private\competitors\source_manifest.json
+```
+
+Preflight validates metadata, SHA-256 identity, encryption compatibility, page extraction, and basic extraction quality. It does not write a corpus or build an index.
+
+## Reusable generic RAG foundation
+
+The generic backend remains usable independently of the competitor application:
+
+```text
+TXT / MD / JSON / JSONL
+        |
+        v
+LoadedDocument
+        |
+        v
+DocumentChunk
+        |
+        v
+EmbeddedChunk
+        |
+        v
+FAISS
+        |
+        v
+Retriever
+        |
+        v
+Generic RAGPipeline
+        |
+        v
+Generation provider
+```
+
+### Provider and index compatibility
+
+Supported provider combinations include Gemini/Gemini, Ollama/Ollama, Gemini/Ollama, and Ollama/Gemini. Only the selected provider is called; there is no silent fallback.
+
+Document and query embeddings must use the same provider, model, and vector space. New indexes include `index_manifest.json`; loading rejects a known provider/model mismatch before querying. Legacy indexes without a manifest remain loadable but cannot receive this compatibility check. Competitor manifest fields are additive and do not invalidate legacy generic manifests.
+
+### Build a generic index
+
+```powershell
+python -m enterprise_rag build-index `
+  --input data\documents `
+  --output data\vector_store `
+  --verbose
+```
+
+Use `--overwrite` only after reviewing an existing destination. Index publication is atomic: a complete, reloadable FAISS index, metadata file, and build manifest replace the destination together.
+
+### Ask with a generic persisted index
 
 ```powershell
 python -m enterprise_rag ask `
   --index-path data\vector_store `
+  --top-k 4 `
   "What is retrieval-augmented generation?"
 ```
 
-This command performs retrieval and generation through the configured
-providers. It does not rebuild the index automatically.
+This generic command performs retrieval and generation through the configured providers. It does not build an index automatically and is separate from competitor comparison retrieval.
 
-## Data and Security
+### Generic `retrieve` scope
 
-- `data/documents/` is local-only except for `.gitkeep`.
-- `data/raw_documents/` contains close-to-source third-party imports and is
-  local-only except for `.gitkeep`.
-- `data/private/`, generated indexes, logs, and caches are ignored.
-- `data/samples/` and `tests/fixtures/` contain public fictional data.
-- Real embedding requests send chunk text to the selected provider; do not process confidential or personal data without authorization.
+The `retrieve` subcommand is a presentation boundary for an already-injected in-memory `Retriever`. It does not load an index, embed documents, generate an answer, or invoke a pipeline. Persisted competitor retrieval uses `competitor-retrieve` instead.
 
-## Document Import
+## Markdown/MDX import and cleaning
 
-`data/raw_documents/` stores selected, close-to-source third-party Markdown or
-MDX files. It is separate from `data/documents/`, which is the input area for
-documents that are ready for the ingestion and indexing workflow. Importing raw
-documents does not clean MDX, create embeddings, or build a FAISS index.
+`data/raw_documents/` contains close-to-source third-party imports. `data/documents/` contains cleaned documents ready for generic ingestion. Both are local-only except for their `.gitkeep` files.
 
-Preview the deterministic LangChain document selection without writing files:
+Preview an import:
 
 ```powershell
 python scripts/import_docs.py `
@@ -215,26 +325,7 @@ python scripts/import_docs.py `
   --verbose
 ```
 
-Run the import after reviewing the preview:
-
-```powershell
-python scripts/import_docs.py `
-  --source ..\langchain-docs-source\src `
-  --output data\raw_documents\langchain
-```
-
-Imported third-party documentation remains subject to its original license and
-usage terms. The user is responsible for confirming that copying, processing,
-and later sending any content to a model provider is permitted. Imported
-contents and manifests under `data/raw_documents/` are ignored by Git by
-default; the external LangChain repository is never copied into this project.
-
-## Document Cleaning & Normalization
-
-`data/raw_documents/` contains close-to-source imports. The cleaning command
-conservatively converts selected `.md`/`.mdx` files into UTF-8 Markdown under
-`data/documents/`, where the existing Markdown loader can read them. Preview a
-complete in-memory cleaning pass without writing files:
+Preview conservative MD/MDX cleaning:
 
 ```powershell
 python scripts/clean_documents.py `
@@ -244,60 +335,49 @@ python scripts/clean_documents.py `
   --verbose
 ```
 
-After reviewing warnings, write cleaned Markdown and the cleaning manifest:
+The cleaner preserves useful Markdown and fenced code while removing supported presentation-layer MDX syntax. Strict mode is the default; `--skip-invalid` explicitly permits invalid sources to be skipped and recorded. Importing or cleaning does not create embeddings or indexes.
 
-```powershell
-python scripts/clean_documents.py `
-  --input data\raw_documents\langchain `
-  --output data\documents\langchain `
-  --strict
+## Retrieval score semantics
+
+Generic `Retriever` results use:
+
+```text
+score = 1 / (1 + squared_l2_distance)
 ```
 
-The cleaner preserves code and useful text while removing presentation-layer
-MDX syntax. It is a conservative first-pass converter, not a complete MDX
-renderer. Cleaning does not create embeddings or a FAISS index. Raw and cleaned
-third-party content are ignored by Git by default, and the user remains
-responsible for the source documents' license and permitted use.
+The score is a monotonic ranking signal: higher means closer within the same embedding provider, model, vector space, and FAISS index.
 
-Strict mode is the safe default. It preflights every source, reports all
-invalid files, and publishes nothing unless the whole batch is valid. When a
-trusted upstream corpus contains known malformed documents, explicitly use
-non-strict mode:
+It is **not**:
 
-```powershell
-python scripts/clean_documents.py `
-  --input data\raw_documents\langchain `
-  --output data\documents\langchain `
-  --skip-invalid `
-  --verbose
-```
+- a probability
+- a confidence score
+- an accuracy percentage
 
-Non-strict mode records every invalid or empty source and its reason in the
-versioned `cleaning_manifest.json`, then publishes all valid documents.
-Cleaning is prepared in a sibling temporary directory; the complete document
-tree and manifest replace the final output together. A failed preflight or
-publish does not damage an existing complete dataset and does not leave a
-manifest-free partial output.
+For balanced competitor retrieval, scores from different company indexes must not be compared as globally calibrated values.
 
-## Original Notebook
+## Known limitations
 
-The Colab notebook is preserved as historical proof of concept and is not the source of truth for the modular implementation.
-## Retrieval Score Semantics
+- English-to-zh-TW retrieval is useful but inconsistent.
+- Table-heavy annual-report pages can pollute retrieval.
+- Adjacent overlapping chunks may both be returned.
+- Balanced Top-K guarantees company coverage, not evidence quality.
+- There is no reranker, query translation, or hybrid retrieval.
+- Competitor synthesis and user-facing citations are not implemented.
+- There is no structured financial-analysis engine or UI.
+- OCR is not supported.
+- This is an engineering prototype, not a production-ready application.
 
-Retriever results use `score = 1 / (1 + squared_l2_distance)`. This is a monotonic display/relevance score derived from the raw squared L2 distance returned by FAISS:
+## Roadmap
 
-- Higher means closer within the current index.
-- It is not cosine similarity, a probability, or an accuracy percentage.
-- It is only meaningful for comparisons within the same embedding provider, model, vector space, and index.
-- Scores must not be compared across models or indexes.
+1. Improve retrieval quality with table/noise filtering and evidence deduplication.
+2. Produce citation-ready evidence.
+3. Add guarded Qwen competitor comparison synthesis.
+4. Build 2024 historical competitor indexes.
+5. Add a curated `financial_facts.csv` layer.
+6. Implement structured financial comparison.
+7. Add a user-facing interface.
+8. Add evaluation, access controls, and production hardening.
 
-## Retrieve CLI Scope
+## Historical notebook
 
-The `retrieve` subcommand presentation layer accepts a question, calls an already-injected in-memory `Retriever`, and prints Top-K score, source, and chunk text. It does not build or load an index, embed documents, generate an answer, or invoke a pipeline.
-
-Persisted indexes can be loaded by `ask --index-path`. The `retrieve` command
-still requires an injected `Retriever`; it remains a presentation boundary for
-tests and application composition. `build-index` is now the explicit command
-that loads documents and calls the selected embedding provider. Missing
-configuration or indexing failures produce a concise error without an internal
-traceback.
+The original Colab notebook is preserved as historical proof of concept and reference material. It is not the canonical implementation; the modular code under `src/enterprise_rag/` is the source of truth.
