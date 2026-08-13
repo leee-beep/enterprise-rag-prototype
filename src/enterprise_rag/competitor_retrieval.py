@@ -9,6 +9,7 @@ from pathlib import Path
 
 from enterprise_rag.config import Settings
 from enterprise_rag.competitor_query_expansion import CompetitorQueryExpander
+from enterprise_rag.competitor_semantic_reranking import LightweightSemanticReranker
 from enterprise_rag.indexing import IndexingError, validate_index_compatibility
 from enterprise_rag.models import RetrievalResult
 from enterprise_rag.retrieval import QueryEmbeddingClient, RetrievalError, Retriever
@@ -39,6 +40,12 @@ class CompetitorRetrievalResult:
     retrieval_result: RetrievalResult
     quality_score: float
     quality_reasons: tuple[str, ...]
+    semantic_relevance_score: float = 0.0
+    semantic_relevance_reasons: tuple[str, ...] = ()
+
+    @property
+    def text(self) -> str:
+        return self.retrieval_result.embedded_chunk.chunk.content
 
 
 @dataclass(frozen=True)
@@ -186,9 +193,11 @@ class BalancedCompetitorRetriever:
         retrievers: Mapping[str, Retriever],
         *,
         query_expander: CompetitorQueryExpander | None = None,
+        semantic_reranker: LightweightSemanticReranker | None = None,
     ) -> None:
         self._retrievers = {key.casefold(): value for key, value in retrievers.items()}
         self._query_expander = query_expander or CompetitorQueryExpander()
+        self._semantic_reranker = semantic_reranker or LightweightSemanticReranker()
 
     @classmethod
     def from_index_root(cls, index_root: str | Path, settings: Settings, embedding_client: QueryEmbeddingClient) -> "BalancedCompetitorRetriever":
@@ -215,26 +224,37 @@ class BalancedCompetitorRetriever:
                 for query in queries
             )
             candidates = _merge_candidate_sets(candidate_sets)
-            selected: list[CompetitorRetrievalResult] = []
+            usable: list[CompetitorRetrievalResult] = []
             rejected: list[tuple[int, tuple[str, ...]]] = []
             for candidate_rank, result in enumerate(candidates, start=1):
                 assessment = assess_evidence_quality(result.embedded_chunk.chunk.content)
                 if not assessment.is_usable:
                     rejected.append((candidate_rank, assessment.reasons))
                     continue
-                if _is_duplicate(result, selected):
+                if _is_duplicate(result, usable):
                     rejected.append((candidate_rank, ("duplicate-or-overlapping",)))
                     continue
-                if len(selected) < top_k_per_company:
-                    selected.append(CompetitorRetrievalResult(
-                        company, COMPANY_NAMES[company], len(selected) + 1,
-                        candidate_rank, result, assessment.quality_score, assessment.reasons,
-                    ))
+                usable.append(CompetitorRetrievalResult(
+                    company, COMPANY_NAMES[company], 0,
+                    candidate_rank, result, assessment.quality_score, assessment.reasons,
+                ))
+            reranked = self._semantic_reranker.rerank(question.strip(), tuple(usable))
+            selected = tuple(
+                CompetitorRetrievalResult(
+                    item.company_id, item.company_name, final_rank,
+                    item.original_candidate_rank, item.retrieval_result,
+                    item.quality_score, item.quality_reasons,
+                    relevance.relevance_score, relevance.reasons,
+                )
+                for final_rank, (item, relevance) in enumerate(
+                    reranked[:top_k_per_company], start=1
+                )
+            )
             if not candidates:
                 rejected.append((0, ("no-candidates",)))
             groups.append(CompanyEvidenceSet(
                 company, COMPANY_NAMES[company], top_k_per_company, len(candidates),
-                tuple(selected), tuple(rejected),
+                selected, tuple(rejected),
             ))
         return BalancedRetrievalResponse(tuple(groups))
 

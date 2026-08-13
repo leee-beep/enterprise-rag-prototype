@@ -31,6 +31,41 @@ _ZH_TW_TERMS = {
     "ai_strategy": "人工智慧 AI 策略 產品 基礎設施",
 }
 
+# Shared, generic bilingual concepts for expansion and local reranking. Values
+# are terminology only: they intentionally contain no company facts.
+CONTROLLED_CONCEPTS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "server": (
+        ("ai_server", ("ai server", "ai servers", "ai伺服器", "ai 伺服器")),
+        ("server", ("server", "servers", "伺服器")),
+        ("data_center", ("data center", "data centers", "資料中心")),
+        ("infrastructure", ("infrastructure", "基礎設施", "基礎方案")),
+    ),
+    "ai_pc": (
+        ("ai_pc", ("ai pc", "ai pcs", "人工智慧個人電腦")),
+        ("notebook", ("notebook", "notebooks", "laptop", "laptops", "筆記型電腦", "筆電")),
+    ),
+    "products": (
+        ("products", ("product", "products", "產品", "產品線", "主要產品")),
+        ("business_scope", ("business scope", "business areas", "business segments", "業務內容", "業務範圍", "事業群")),
+        ("portfolio", ("product portfolio", "產品組合")),
+    ),
+    "growth": (
+        ("growth", ("growth", "成長", "增長")),
+        ("driver", ("growth driver", "growth momentum", "growth engine", "成長動能", "成長引擎", "成長驅動")),
+        ("demand", ("market demand", "需求", "市場需求")),
+    ),
+    "ai_strategy": (
+        ("ai", ("artificial intelligence", "人工智慧", "ai")),
+        ("strategy", ("strategy", "strategies", "strategic", "策略", "佈局", "布局")),
+        ("applications", ("applications", "應用", "產品", "infrastructure", "基礎設施")),
+    ),
+}
+
+
+def detect_competitor_intent(question: str) -> str | None:
+    """Return the first narrowly recognized controlled retrieval intent."""
+    return next((name for pattern, name in _INTENTS if pattern.search(question)), None)
+
 
 class CompetitorQueryExpander:
     """Return the original query and at most one controlled terminology variant."""
@@ -38,7 +73,7 @@ class CompetitorQueryExpander:
     def expand(self, question: str, company_id: str) -> tuple[str, ...]:
         original = question.strip()
         company = company_id.strip().casefold()
-        intent = next((name for pattern, name in _INTENTS if pattern.search(original)), None)
+        intent = detect_competitor_intent(original)
         if intent is None:
             return (original,)
         terms = _ENGLISH_TERMS if company == "gigabyte" else _ZH_TW_TERMS
