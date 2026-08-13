@@ -20,6 +20,12 @@ from enterprise_rag.generation import GenerationClient, generate_prompt
 from enterprise_rag.pipeline import RAGPipeline
 from enterprise_rag.vector_store import FaissVectorStore, VectorStoreError
 from enterprise_rag.competitor_retrieval import BalancedCompetitorRetriever
+from enterprise_rag.competitor_analysis import (
+    CitationValidationError,
+    CompetitorAnalysisError,
+    CompetitorAnalysisPipeline,
+    render_citation,
+)
 from enterprise_rag.retrieval import RetrievalError
 
 class CLIConfigurationError(RuntimeError):
@@ -78,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     competitor.add_argument("--top-k-per-company", type=int, default=2)
     competitor.add_argument(
+        "--index-root", type=Path, default=Path("data/vector_store/competitors")
+    )
+    competitor_ask = subcommands.add_parser(
+        "competitor-ask",
+        help="Generate a guarded competitor answer from citation-ready evidence.",
+    )
+    competitor_ask.add_argument("question", nargs="?", help="Competitor-analysis question.")
+    competitor_ask.add_argument("--companies", nargs="+", required=True)
+    competitor_ask.add_argument("--top-k-per-company", type=int, default=2)
+    competitor_ask.add_argument(
         "--index-root", type=Path, default=Path("data/vector_store/competitors")
     )
     return parser
@@ -176,6 +192,7 @@ def main(
     query_embedding_client: QueryEmbeddingClient | None = None,
     index_builder: Callable[[], FaissVectorStore] | None = None,
     indexing_service: IndexingService | None = None,
+    competitor_pipeline: CompetitorAnalysisPipeline | None = None,
     output: TextIO | None = None,
 ) -> int:
     output = sys.stdout if output is None else output
@@ -284,6 +301,34 @@ def main(
                 print(f"Chunk ID: {chunk.chunk_id}", file=output)
                 print(f"Preview: {preview}", file=output)
         return 0
+    if args.command == "competitor-ask":
+        question = args.question if args.question is not None else input("Question: ")
+        if competitor_pipeline is None:
+            settings = load_settings()
+            embedding_client = query_embedding_client or create_embedding_client(settings)
+            generation_client = generation_client or create_generation_client(settings)
+            competitor_pipeline = CompetitorAnalysisPipeline(
+                BalancedCompetitorRetriever.from_index_root(
+                    args.index_root, settings, embedding_client
+                ),
+                generation_client,
+            )
+        answer = competitor_pipeline.answer(
+            question, args.companies, args.top_k_per_company
+        )
+        print("ANSWER", file=output)
+        print(answer.answer_text, file=output)
+        print("\nEVIDENCE STATUS", file=output)
+        for status in answer.evidence_status:
+            label = "sufficient" if status.sufficient else "insufficient"
+            print(f"{status.company_name}: {label} ({status.evidence_count})", file=output)
+        print("\nCITATIONS", file=output)
+        if answer.citations:
+            for citation in answer.citations:
+                print(render_citation(citation), file=output)
+        else:
+            print("None", file=output)
+        return 0
     raise CLIConfigurationError(f"Unsupported command: {args.command!r}.")
 
 def run_cli(
@@ -295,6 +340,7 @@ def run_cli(
     query_embedding_client: QueryEmbeddingClient | None = None,
     index_builder: Callable[[], FaissVectorStore] | None = None,
     indexing_service: IndexingService | None = None,
+    competitor_pipeline: CompetitorAnalysisPipeline | None = None,
     output: TextIO | None = None,
     error_output: TextIO = sys.stderr,
 ) -> int:
@@ -308,6 +354,7 @@ def run_cli(
             query_embedding_client=query_embedding_client,
             index_builder=index_builder,
             indexing_service=indexing_service,
+            competitor_pipeline=competitor_pipeline,
             output=output,
         )
     except (
@@ -317,6 +364,8 @@ def run_cli(
         EmbeddingError,
         VectorStoreError,
         RetrievalError,
+        CompetitorAnalysisError,
+        CitationValidationError,
     ) as exc:
         print(f"Error: {exc}", file=error_output)
         return 2
