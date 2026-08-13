@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from enterprise_rag.config import Settings
+from enterprise_rag.competitor_query_expansion import CompetitorQueryExpander
 from enterprise_rag.indexing import IndexingError, validate_index_compatibility
 from enterprise_rag.models import RetrievalResult
 from enterprise_rag.retrieval import QueryEmbeddingClient, RetrievalError, Retriever
@@ -15,7 +16,7 @@ from enterprise_rag.vector_store import FaissVectorStore, VectorStoreError
 
 
 COMPANY_NAMES = {"gigabyte": "Gigabyte", "asus": "ASUS", "msi": "MSI"}
-CANDIDATE_POOL_MULTIPLIER = 3
+CANDIDATES_PER_QUERY = 12
 MIN_QUALITY_SCORE = 0.45
 ADJACENT_OVERLAP_THRESHOLD = 0.45
 _SENTENCE_END = re.compile(r"(?:[a-z][.!?]|[。？！])(?:\s|$)")
@@ -180,8 +181,14 @@ def _is_duplicate(candidate: RetrievalResult, selected: Sequence[CompetitorRetri
 class BalancedCompetitorRetriever:
     """Select usable evidence independently from each requested company."""
 
-    def __init__(self, retrievers: Mapping[str, Retriever]) -> None:
+    def __init__(
+        self,
+        retrievers: Mapping[str, Retriever],
+        *,
+        query_expander: CompetitorQueryExpander | None = None,
+    ) -> None:
         self._retrievers = {key.casefold(): value for key, value in retrievers.items()}
+        self._query_expander = query_expander or CompetitorQueryExpander()
 
     @classmethod
     def from_index_root(cls, index_root: str | Path, settings: Settings, embedding_client: QueryEmbeddingClient) -> "BalancedCompetitorRetriever":
@@ -201,9 +208,13 @@ class BalancedCompetitorRetriever:
     def retrieve(self, question: str, company_ids: Sequence[str], top_k_per_company: int) -> BalancedRetrievalResponse:
         normalized = self._validate_request(question, company_ids, top_k_per_company)
         groups: list[CompanyEvidenceSet] = []
-        candidate_k = top_k_per_company * CANDIDATE_POOL_MULTIPLIER
         for company in normalized:
-            candidates = self._retrievers[company].retrieve(question.strip(), candidate_k)
+            queries = self._query_expander.expand(question.strip(), company)
+            candidate_sets = tuple(
+                self._retrievers[company].retrieve(query, CANDIDATES_PER_QUERY)
+                for query in queries
+            )
+            candidates = _merge_candidate_sets(candidate_sets)
             selected: list[CompetitorRetrievalResult] = []
             rejected: list[tuple[int, tuple[str, ...]]] = []
             for candidate_rank, result in enumerate(candidates, start=1):
@@ -244,3 +255,29 @@ class BalancedCompetitorRetriever:
         if missing:
             raise RetrievalError(f"Company index is unavailable for {missing[0]}.")
         return normalized
+
+
+def _merge_candidate_sets(
+    candidate_sets: Sequence[Sequence[RetrievalResult]],
+) -> tuple[RetrievalResult, ...]:
+    """Merge company-local results by rank, with original-query priority.
+
+    Each query has a fixed ``CANDIDATES_PER_QUERY`` budget. Rank one from every
+    query precedes rank two, while the original query wins same-rank ties.
+    Duplicate chunk IDs are retained only at their earliest merged position.
+    Scores are never combined or compared across queries or companies.
+    """
+    merged: list[RetrievalResult] = []
+    seen: set[str] = set()
+    maximum = max((len(items) for items in candidate_sets), default=0)
+    for rank in range(maximum):
+        for items in candidate_sets:
+            if rank >= len(items):
+                continue
+            candidate = items[rank]
+            chunk_id = candidate.embedded_chunk.chunk.chunk_id
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            merged.append(candidate)
+    return tuple(merged)

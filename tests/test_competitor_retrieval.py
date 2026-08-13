@@ -60,10 +60,10 @@ def test_quality_gate_rejects_table_and_low_language_density(text):
     assert not assessment.is_usable and assessment.reasons
 
 
-def test_candidate_pool_is_three_times_final_k_and_noise_is_skipped():
+def test_candidate_budget_is_twelve_per_query_and_noise_is_skipped():
     service,_,stores=balanced([TABLE,ENGLISH,OWNERSHIP,CHINESE,REVENUE,AFFILIATES],("asus",))
     response=service.retrieve("AI strategy",("asus",),2); group=response.company_evidence[0]
-    assert stores["asus"].calls==[6]
+    assert stores["asus"].calls==[12,12]
     assert [item.original_candidate_rank for item in group.evidence]==[2,4]
     assert [item.company_rank for item in group.evidence]==[1,2]
     assert not group.insufficient_evidence
