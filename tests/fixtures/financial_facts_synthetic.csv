@@ -1,0 +1,5 @@
+company_id,company_name,ticker,fiscal_year,period,metric,value,currency,unit,reporting_scope,document_type,source_document_id,source_title,page_number,source_label,source_sha256,notes
+gigabyte,Gigabyte,2376,2024,FY,revenue,123456,TWD,thousand_TWD,consolidated,consolidated_financial_report,synthetic:gigabyte:2024,Synthetic Gigabyte 2024 Financial Report,10,Revenue,,Fictional test value
+gigabyte,Gigabyte,2376,2025,FY,revenue,130,TWD,million_TWD,consolidated,consolidated_financial_report,synthetic:gigabyte:2025,Synthetic Gigabyte 2025 Financial Report,11,Revenue,,Fictional test value
+asus,ASUS,2357,2025,FY,operating_income,-2500,TWD,thousand_TWD,consolidated,consolidated_financial_report,synthetic:asus:2025,Synthetic ASUS 2025 Financial Report,20,Operating income,,Fictional test loss
+msi,MSI,2377,2025,FY,eps,12.3456,TWD,TWD,consolidated,consolidated_financial_report,synthetic:msi:2025,Synthetic MSI 2025 Financial Report,30,EPS,,Fictional test EPS
