@@ -132,7 +132,35 @@ def domain_result(status: OrchestrationStatus) -> CompetitorIntelligenceResult:
 
 
 def client(application: FakeApplication) -> TestClient:
-    return TestClient(create_competitor_api(application))  # type: ignore[arg-type]
+    return TestClient(
+        create_competitor_api(
+            application,  # type: ignore[arg-type]
+            cors_origins=("http://localhost:3000",),
+        )
+    )
+
+
+def test_cors_allows_only_configured_origin_and_supports_analyze_preflight() -> None:
+    backend = FakeApplication(completed_result())
+    with client(backend) as http:
+        allowed = http.get("/ready", headers={"Origin": "http://localhost:3000"})
+        unlisted = http.get("/ready", headers={"Origin": "http://example.test"})
+        preflight = http.options(
+            "/api/competitor/analyze",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "access-control-allow-origin" not in unlisted.headers
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "POST" in preflight.headers["access-control-allow-methods"]
+    assert "access-control-allow-credentials" not in preflight.headers
+    assert backend.questions == []
 
 
 def test_health_is_stable_and_does_not_run_backend() -> None:

@@ -7,6 +7,7 @@ from typing import Literal
 
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -39,6 +40,7 @@ from enterprise_rag.financial_facts import (
 )
 from enterprise_rag.generation import GenerationError
 from enterprise_rag.providers.ollama import OllamaError
+from enterprise_rag.config import load_settings
 
 
 APIStatus = Literal[
@@ -132,6 +134,8 @@ class APIResponseContractError(RuntimeError):
 
 def create_competitor_api(
     application: CompetitorIntelligenceApplication | None = None,
+    *,
+    cors_origins: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """Create a local API whose lifespan constructs at most one backend."""
 
@@ -155,6 +159,17 @@ def create_competitor_api(
         title="Local Competitor Intelligence API",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(
+            cors_origins
+            if cors_origins is not None
+            else load_settings().competitor_api_cors_origins
+        ),
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
     )
 
     @api.get("/health", response_model=HealthResponse)

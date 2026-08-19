@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from enterprise_rag.json_config import JsonLoaderSettings, load_json_loader_settings
@@ -12,6 +13,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 API_KEY_PLACEHOLDERS = {"your_gemini_api_key_here", "replace_me", "changeme"}
 SUPPORTED_PROVIDERS = frozenset({"gemini", "ollama"})
+DEFAULT_COMPETITOR_API_CORS_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+)
 
 class ConfigurationError(ValueError):
     """Raised when local environment settings are missing or invalid."""
@@ -41,6 +46,9 @@ class Settings:
     financial_facts_path: Path = field(
         default_factory=lambda: PROJECT_ROOT
         / "data/private/competitors/financial_facts.csv"
+    )
+    competitor_api_cors_origins: tuple[str, ...] = (
+        DEFAULT_COMPETITOR_API_CORS_ORIGINS
     )
 
     @property
@@ -112,6 +120,32 @@ def _path_setting(name: str, default: str) -> Path:
         path = PROJECT_ROOT / path
     return path.resolve()
 
+
+def _cors_origins_setting() -> tuple[str, ...]:
+    raw = os.getenv(
+        "COMPETITOR_API_CORS_ORIGINS",
+        ",".join(DEFAULT_COMPETITOR_API_CORS_ORIGINS),
+    )
+    origins = tuple(dict.fromkeys(part.strip().rstrip("/") for part in raw.split(",") if part.strip()))
+    if not origins:
+        raise ConfigurationError("COMPETITOR_API_CORS_ORIGINS must contain at least one local origin.")
+    for origin in origins:
+        parsed = urlsplit(origin)
+        if (
+            origin == "*"
+            or parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in {"localhost", "127.0.0.1"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ConfigurationError(
+                "COMPETITOR_API_CORS_ORIGINS accepts only explicit localhost or 127.0.0.1 origins."
+            )
+    return origins
+
 def load_settings(*, env_file: Path | None = None, load_env_file: bool = True) -> Settings:
     """Load settings without validating API keys or performing network calls."""
     if load_env_file:
@@ -152,4 +186,5 @@ def load_settings(*, env_file: Path | None = None, load_env_file: bool = True) -
             "FINANCIAL_FACTS_PATH",
             "data/private/competitors/financial_facts.csv",
         ),
+        competitor_api_cors_origins=_cors_origins_setting(),
     )

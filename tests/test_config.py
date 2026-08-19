@@ -22,6 +22,7 @@ SETTING_NAMES = (
     "OLLAMA_EMBEDDING_MODEL",
     "OLLAMA_CHAT_MODEL",
     "OLLAMA_TIMEOUT_SECONDS",
+    "COMPETITOR_API_CORS_ORIGINS",
 )
 
 
@@ -49,6 +50,41 @@ def test_local_settings_load_without_gemini_api_key(
     assert settings.financial_facts_path == (
         PROJECT_ROOT / "data/private/competitors/financial_facts.csv"
     ).resolve()
+    assert settings.competitor_api_cors_origins == (
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    )
+
+
+def test_cors_origins_are_trimmed_and_deduplicated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_settings(monkeypatch)
+    monkeypatch.setenv(
+        "COMPETITOR_API_CORS_ORIGINS",
+        " http://localhost:3000/,http://127.0.0.1:3001,http://localhost:3000 ",
+    )
+
+    settings = load_settings(load_env_file=False)
+
+    assert settings.competitor_api_cors_origins == (
+        "http://localhost:3000",
+        "http://127.0.0.1:3001",
+    )
+
+
+@pytest.mark.parametrize(
+    "origins",
+    ["*", "https://example.com", "http://localhost:3000/path", ""],
+)
+def test_cors_origins_reject_non_local_or_ambiguous_values(
+    monkeypatch: pytest.MonkeyPatch, origins: str
+) -> None:
+    clear_settings(monkeypatch)
+    monkeypatch.setenv("COMPETITOR_API_CORS_ORIGINS", origins)
+
+    with pytest.raises(ConfigurationError, match="COMPETITOR_API_CORS_ORIGINS"):
+        load_settings(load_env_file=False)
 
 
 def test_gemini_feature_requires_api_key_only_when_requested(

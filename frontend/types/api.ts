@@ -8,9 +8,9 @@ export type DomainStatus =
 export type UiBackendStatus = "ready" | "loading" | "unavailable" | "unknown";
 export type UiOperationState =
   | "idle"
-  | "loading"
+  | "submitting"
   | "unavailable"
-  | "generation_failure";
+  | "server_failure";
 
 export interface HealthResponse {
   status: "ok";

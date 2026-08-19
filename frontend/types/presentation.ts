@@ -14,22 +14,37 @@ export interface TopicShortcut {
 export interface EvidenceViewModel {
   id: string;
   kind: EvidenceKind;
-  company: string;
-  ticker: string;
-  year: number;
-  page: number;
-  title: string;
-  excerpt: string;
+  companyId: string | null;
+  companyName: string | null;
+  fiscalYear: string | null;
+  sources: EvidenceSourceViewModel[];
+}
+
+export interface EvidenceSourceViewModel {
+  sourceTitle: string;
+  pageNumber: string | null;
+  sourceMetric: string | null;
+  fiscalYear: string | null;
+  documentType: string | null;
 }
 
 export interface FinancialDisplayItem {
-  company: string;
-  ticker: string;
-  fiscalYear: string;
-  metric: string;
+  evidenceId: string;
+  companyId: string | null;
+  claimType: string;
+  role: string;
   displayValue: string;
-  rankLabel: string;
-  tied: boolean;
+  rankLabel: string | null;
+}
+
+export interface WorkspaceResultViewModel {
+  question: string;
+  status: import("./api").DomainStatus;
+  answerText: string | null;
+  reasons: string[];
+  evidence: EvidenceViewModel[];
+  financialItems: FinancialDisplayItem[];
+  generation: { provider: string | null; model: string | null } | null;
 }
 
 // Numeric values are permitted only for the isolated synthetic preview chart.
