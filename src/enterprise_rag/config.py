@@ -35,6 +35,13 @@ class Settings:
     ollama_chat_model: str = "llama3.2"
     ollama_timeout_seconds: float = 30.0
     ollama_embedding_batch_size: int = 32
+    competitor_index_root: Path = field(
+        default_factory=lambda: PROJECT_ROOT / "data/vector_store/competitors"
+    )
+    financial_facts_path: Path = field(
+        default_factory=lambda: PROJECT_ROOT
+        / "data/private/competitors/financial_facts.csv"
+    )
 
     @property
     def gemini_chat_model(self) -> str:
@@ -137,5 +144,12 @@ def load_settings(*, env_file: Path | None = None, load_env_file: bool = True) -
         ollama_timeout_seconds=_positive_float_setting("OLLAMA_TIMEOUT_SECONDS", 30.0),
         ollama_embedding_batch_size=_integer_setting(
             "OLLAMA_EMBEDDING_BATCH_SIZE", 32, minimum=1
+        ),
+        competitor_index_root=_path_setting(
+            "COMPETITOR_INDEX_ROOT", "data/vector_store/competitors"
+        ),
+        financial_facts_path=_path_setting(
+            "FINANCIAL_FACTS_PATH",
+            "data/private/competitors/financial_facts.csv",
         ),
     )

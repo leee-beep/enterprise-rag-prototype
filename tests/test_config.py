@@ -10,6 +10,8 @@ SETTING_NAMES = (
     "GEMINI_EMBEDDING_MODEL",
     "DOCUMENTS_DIR",
     "VECTOR_STORE_DIR",
+    "COMPETITOR_INDEX_ROOT",
+    "FINANCIAL_FACTS_PATH",
     "CHUNK_SIZE",
     "CHUNK_OVERLAP",
     "TOP_K",
@@ -41,6 +43,12 @@ def test_local_settings_load_without_gemini_api_key(
     assert settings.chunk_size == 200
     assert settings.chunk_overlap == 50
     assert settings.top_k == 4
+    assert settings.competitor_index_root == (
+        PROJECT_ROOT / "data/vector_store/competitors"
+    ).resolve()
+    assert settings.financial_facts_path == (
+        PROJECT_ROOT / "data/private/competitors/financial_facts.csv"
+    ).resolve()
 
 
 def test_gemini_feature_requires_api_key_only_when_requested(
