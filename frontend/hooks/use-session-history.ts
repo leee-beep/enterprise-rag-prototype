@@ -31,5 +31,10 @@ export function useSessionHistory() {
     cachedRaw = null;
     listeners.forEach((listener) => listener());
   }
-  return { history, addHistory };
+  function clearHistory() {
+    sessionStorage.removeItem(HISTORY_KEY);
+    cachedRaw = null;
+    listeners.forEach((listener) => listener());
+  }
+  return { history, addHistory, clearHistory };
 }

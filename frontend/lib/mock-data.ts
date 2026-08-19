@@ -1,8 +1,4 @@
-import type {
-  CompanyOption,
-  SyntheticChartDatum,
-  TopicShortcut,
-} from "@/types/presentation";
+import type { CompanyOption, TopicShortcut } from "@/types/presentation";
 
 export const companies: CompanyOption[] = [
   { id: "asus", name: "ASUS", ticker: "2357" },
@@ -22,15 +18,8 @@ export const topics: TopicShortcut[] = [
 ];
 
 export const previewPrompts = [
-  "Compare 2025 operating margin trends",
-  "What strategic risks do the reports discuss?",
-  "Summarize each company's AI positioning",
-];
-
-// Explicitly synthetic preview content. No private document text or real facts.
-// Isolated showcase-only numbers; real API financial strings are never parsed.
-export const syntheticMarginChartData: SyntheticChartDatum[] = [
-  { company: "ASUS", value: 6.4 },
-  { company: "Gigabyte", value: 7.1 },
-  { company: "MSI", value: 6.4 },
+  "Compare ASUS and Gigabyte's AI strategies.",
+  "Compare ASUS and MSI's 2025 gross margins.",
+  "How did Gigabyte's operating margin change from 2024 to 2025?",
+  "Compare AI server positioning across the three companies.",
 ];

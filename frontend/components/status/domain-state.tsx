@@ -1,11 +1,14 @@
 import type { DomainStatus } from "@/types/api";
-const copy: Record<DomainStatus, string> = {
-  completed: "Analysis completed",
-  partial: "Partial company coverage",
-  ambiguous: "Refine the question for a more precise comparison",
-  unsupported: "This request is outside the supported analysis scope",
-  insufficient: "Available evidence is insufficient for a grounded conclusion",
+
+const copy: Record<DomainStatus, { label: string; detail: string }> = {
+  completed: { label: "Completed", detail: "Grounded analysis is ready for review." },
+  partial: { label: "Partial coverage", detail: "The available result is usable, with evidence limitations noted below." },
+  ambiguous: { label: "Needs refinement", detail: "Make the company, year, or analysis goal more specific." },
+  unsupported: { label: "Outside scope", detail: "This request is outside the workspace's current analysis capabilities." },
+  insufficient: { label: "Insufficient evidence", detail: "There is not enough trusted evidence for a grounded conclusion." },
 };
+
 export function DomainState({ status }: { status: DomainStatus }) {
-  return <div className={`domain-state domain-${status}`} role="status"><strong>{status.replace("_", " ")}</strong><span>{copy[status]}</span></div>;
+  const state = copy[status];
+  return <div className={`domain-state domain-${status}`} role="status"><span className="state-mark" aria-hidden="true" /><div><strong>{state.label}</strong><span>{state.detail}</span></div></div>;
 }
