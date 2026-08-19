@@ -1,7 +1,8 @@
 """Provider-neutral text generation interfaces."""
 from __future__ import annotations
 
-from typing import Any, Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol, runtime_checkable
 
 from enterprise_rag.config import Settings
 from enterprise_rag.models import GenerationResult
@@ -25,6 +26,17 @@ class GenerationClient(Protocol):
 
     def generate(self, prompt: str) -> str:
         """Generate one non-streaming text response for a prompt."""
+        ...
+
+
+@runtime_checkable
+class StructuredGenerationClient(GenerationClient, Protocol):
+    """Optional provider capability for schema-constrained JSON generation."""
+
+    def generate_structured(
+        self, prompt: str, schema: Mapping[str, Any]
+    ) -> str:
+        """Generate one response constrained by a JSON schema."""
         ...
 
 def validate_generation_prompt(prompt: object) -> str:

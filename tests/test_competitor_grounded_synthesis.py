@@ -10,6 +10,7 @@ from decimal import Decimal
 import pytest
 
 from enterprise_rag.competitor_analysis import CitationReadyEvidence
+from enterprise_rag.competitor_citations import render_competitor_answer
 from enterprise_rag.competitor_evidence import UnifiedEvidenceBuilder, UnifiedEvidenceSet
 from enterprise_rag.competitor_grounded_synthesis import (
     FinancialGroundingError,
@@ -17,7 +18,10 @@ from enterprise_rag.competitor_grounded_synthesis import (
     GroundedCompetitorSynthesizer,
     GroundedGenerationError,
     GroundedResponseFormatError,
+    GroundedSynthesisError,
     GroundedSynthesisStatus,
+    FINANCIAL_RESPONSE_SCHEMA,
+    QualitativeCoverage,
     UnknownEvidenceCitationError,
     build_grounded_synthesis_prompt,
 )
@@ -47,6 +51,28 @@ class FakeGenerationClient:
         return self.response
 
 
+class FakeStructuredGenerationClient(FakeGenerationClient):
+    def __init__(self, response: str) -> None:
+        super().__init__(response)
+        self.schemas: list[dict[str, object]] = []
+
+    def generate_structured(self, prompt: str, schema: dict[str, object]) -> str:
+        self.prompts.append(prompt)
+        self.schemas.append(schema)
+        return self.response
+
+
+class SequenceStructuredGenerationClient(FakeStructuredGenerationClient):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__("")
+        self.responses = iter(responses)
+
+    def generate_structured(self, prompt: str, schema: dict[str, object]) -> str:
+        self.prompts.append(prompt)
+        self.schemas.append(schema)
+        return next(self.responses)
+
+
 class FailingGenerationClient(FakeGenerationClient):
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
@@ -65,14 +91,27 @@ def response(
         if financial_claims is None
         else financial_claims
     )
-    return json.dumps(
-        {
-            "answer_text": answer_text,
-            "cited_evidence_ids": list(cited),
-            "financial_claims": claims,
-            "insufficient": insufficient,
-        }
-    )
+    block_text = re.sub(
+        r"\s*\[((?:E\d+\s*(?:,\s*E\d+\s*)*))\]",
+        "",
+        answer_text,
+    ).strip()
+    block_text = re.sub(r"\[\[[^\[\]\r\n]+\]\]", "", block_text).strip()
+    del cited, insufficient
+    return json.dumps({"claims": claims} if claims else {"text": block_text})
+
+
+def blocks_response(
+    blocks: list[dict[str, object]],
+    *,
+    insufficient: bool = False,
+    financial_claims: list[dict[str, object]] | None = None,
+) -> str:
+    del insufficient
+    if financial_claims:
+        return json.dumps({"claims": financial_claims})
+    text = "\n\n".join(str(block.get("text", "")) for block in blocks)
+    return json.dumps({"text": text})
 
 
 def _claims_for_markers(answer_text: str) -> list[dict[str, object]]:
@@ -105,19 +144,20 @@ def _claims_for_markers(answer_text: str) -> list[dict[str, object]]:
     return claims
 
 
-def qualitative() -> CitationReadyEvidence:
+def qualitative(company_id: str = "asus") -> CitationReadyEvidence:
+    company_name, ticker = COMPANIES[company_id]
     return CitationReadyEvidence(
         evidence_id="old-evidence-id",
-        company_id="asus",
-        company_name="ASUS",
-        ticker="2357",
+        company_id=company_id,
+        company_name=company_name,
+        ticker=ticker,
         fiscal_year=2025,
         document_type="annual_report",
-        source_document_id="synthetic-asus-2025",
-        source_title="Synthetic ASUS Annual Report",
+        source_document_id=f"synthetic-{company_id}-2025",
+        source_title=f"Synthetic {company_name} Annual Report",
         page_number=42,
-        chunk_id="synthetic-asus:page-0042:chunk-000001",
-        text="ASUS describes a fictional AI infrastructure strategy.",
+        chunk_id=f"synthetic-{company_id}:page-0042:chunk-000001",
+        text=f"{company_name} describes a fictional AI infrastructure strategy.",
         retrieval_score=0.2,
         quality_score=0.9,
         original_candidate_rank=2,
@@ -184,10 +224,61 @@ def test_qualitative_only_grounded_synthesis() -> None:
         "Describe the strategy.", unified(qualitative())
     )
     assert result.status is GroundedSynthesisStatus.GROUNDED
-    assert result.answer_text == "Supported qualitative claim [E1]."
+    assert result.answer_text == "Supported qualitative claim. [E1]"
     assert result.cited_evidence_ids == ("E1",)
     assert result.financial_claims == ()
     assert result.generation_provider == "fake" and result.generation_model == "fake-grounded-model"
+
+
+def test_python_owns_complete_qualitative_coverage_and_scope_citations() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS and MSI AI strategies.")
+    client = FakeStructuredGenerationClient(json.dumps({"text": "Supported comparison."}))
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        plan.question, unified(qualitative("asus"), qualitative("msi")), plan
+    )
+    assert result.qualitative_coverage is QualitativeCoverage.COMPLETE
+    assert result.missing_qualitative_companies == ()
+    assert result.cited_evidence_ids == ("E1", "E2")
+    assert len(client.prompts) == 1
+
+
+def test_python_owns_partial_qualitative_coverage() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS and MSI AI strategies.")
+    client = FakeStructuredGenerationClient(json.dumps({"text": "Available evidence only."}))
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        plan.question, unified(qualitative("asus")), plan
+    )
+    assert result.status is GroundedSynthesisStatus.PARTIAL
+    assert result.qualitative_coverage is QualitativeCoverage.PARTIAL
+    assert result.missing_qualitative_companies == ("msi",)
+    assert result.cited_evidence_ids == ("E1",)
+    assert "MSI describes" not in client.prompts[0]
+
+
+def test_zero_qualitative_evidence_skips_generation() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS and MSI AI strategies.")
+    client = FakeStructuredGenerationClient(json.dumps({"text": "must not be used"}))
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        plan.question, unified(), plan
+    )
+    assert result.status is GroundedSynthesisStatus.INSUFFICIENT
+    assert result.qualitative_coverage is QualitativeCoverage.INSUFFICIENT
+    assert result.missing_qualitative_companies == ("asus", "msi")
+    assert client.prompts == []
+
+
+def test_grounded_synthesis_uses_optional_structured_generation_capability() -> None:
+    client = FakeStructuredGenerationClient(
+        response("Supported qualitative claim [E1].")
+    )
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        "Describe the strategy.", unified(qualitative())
+    )
+    assert result.status is GroundedSynthesisStatus.GROUNDED
+    assert len(client.schemas) == 1
+    assert client.schemas[0]["additionalProperties"] is False
+    assert set(client.schemas[0]["required"]) == {"text"}
+    assert client.schemas[0]["properties"]["text"] == {"type": "string"}
 
 
 def test_financial_fact_synthesis_preserves_exact_reported_value() -> None:
@@ -195,7 +286,7 @@ def test_financial_fact_synthesis_preserves_exact_reported_value() -> None:
         response("Reported revenue was [[E1:reported_value:100]] million TWD [E1].")
     )
     result = GroundedCompetitorSynthesizer(client).synthesize("Revenue?", unified(fact()))
-    assert result.answer_text == "Reported revenue was 100 million TWD [E1]."
+    assert result.answer_text == "ASUS 2025 revenue reported value: 100 million_TWD [E1]"
     assert result.financial_claims[0].claim_type is FinancialClaimType.REPORTED_FACT
     assert "financial_fact" in client.prompts[0]
     assert '"reported_source_value":"100"' in client.prompts[0]
@@ -307,7 +398,7 @@ def test_financial_comparison_preserves_supplied_ranking() -> None:
     assert "financial_comparison" in prompt
     assert '"rank":1' in prompt and '"rank":2' in prompt
     assert '"ranking_direction":"higher_value_first"' in prompt
-    assert "never rerank it" in prompt
+    assert "Never calculate" in prompt
 
 
 def comparison_evidence() -> UnifiedEvidenceSet:
@@ -349,7 +440,8 @@ def test_comparison_accepts_tied_entries_with_supplied_rank() -> None:
         )
     )
     result = GroundedCompetitorSynthesizer(client).synthesize("Compare.", evidence)
-    assert "40.00 and 40.00" in result.answer_text
+    assert "Rank 1" in result.answer_text
+    assert result.answer_text.count("40.00") == 2
 
 
 def test_partial_comparison_missing_company_cannot_be_invented() -> None:
@@ -420,16 +512,17 @@ def test_change_rejects_role_substitution(marker: str) -> None:
 
 def test_combined_qualitative_and_financial_synthesis() -> None:
     evidence = unified(qualitative(), calculation())
-    client = FakeGenerationClient(
-        response(
-            "The strategy is described in the report [E1], while Python calculated "
-            "the margin as [[E2:calculated_value:40.00]] percent [E2].",
-            ("E1", "E2"),
-        )
+    claims = _claims_for_markers("[[E2:calculated_value:40.00]]")
+    client = SequenceStructuredGenerationClient(
+        [json.dumps({"text": "The strategy is described in the report."}),
+         json.dumps({"claims": claims})]
     )
     result = GroundedCompetitorSynthesizer(client).synthesize("Combine them.", evidence)
     assert result.cited_evidence_ids == ("E1", "E2")
     assert "40.00 percent" in result.answer_text
+    assert len(client.prompts) == 2
+    assert client.schemas[0]["required"] == ["text"]
+    assert client.schemas[1]["required"] == ["claims"]
 
 
 def test_prompt_and_repeated_synthesis_are_deterministic_and_ordered() -> None:
@@ -438,33 +531,61 @@ def test_prompt_and_repeated_synthesis_are_deterministic_and_ordered() -> None:
     second_prompt = build_grounded_synthesis_prompt("Question?", evidence)
     assert first_prompt == second_prompt
     assert first_prompt.index('"evidence_id":"E1"') < first_prompt.index('"evidence_id":"E2"')
-    payload = response("Qualitative claim [E1].")
-    first = GroundedCompetitorSynthesizer(FakeGenerationClient(payload)).synthesize(
+    payloads = [response("Qualitative claim [E1]."), response("[[E2:reported_value:100]]")]
+    first = GroundedCompetitorSynthesizer(SequenceStructuredGenerationClient(payloads)).synthesize(
         "Question?", evidence
     )
-    second = GroundedCompetitorSynthesizer(FakeGenerationClient(payload)).synthesize(
+    second = GroundedCompetitorSynthesizer(SequenceStructuredGenerationClient(payloads)).synthesize(
         "Question?", evidence
     )
     assert first == second
 
 
-@pytest.mark.parametrize(
-    "answer,cited",
-    (("Invented source [E99].", ("E99",)), ("Invented source [E99].", ("E1",))),
-)
-def test_unknown_or_hallucinated_evidence_id_is_rejected(
-    answer: str, cited: tuple[str, ...]
-) -> None:
-    client = FakeGenerationClient(response(answer, cited))
-    with pytest.raises(UnknownEvidenceCitationError):
-        GroundedCompetitorSynthesizer(client).synthesize("Question?", unified(qualitative()))
-
-
-def test_declared_and_written_citations_must_match_order() -> None:
+def test_qualitative_scope_citations_follow_python_evidence_order() -> None:
     evidence = unified(qualitative(), qualitative())
-    client = FakeGenerationClient(response("Claims [E1] and [E2].", ("E2", "E1")))
-    with pytest.raises(GroundedResponseFormatError, match="match"):
-        GroundedCompetitorSynthesizer(client).synthesize("Question?", evidence)
+    client = FakeStructuredGenerationClient(json.dumps({"text": "Jointly supported claim."}))
+    result = GroundedCompetitorSynthesizer(client).synthesize("Question?", evidence)
+    assert result.answer_text == "Jointly supported claim. [E1, E2]"
+    assert result.cited_evidence_ids == ("E1", "E2")
+    assert len(client.prompts) == 1
+
+
+def test_provider_block_text_must_not_contain_citation_syntax() -> None:
+    client = FakeGenerationClient(json.dumps({"text": "Claim [E1]."}))
+    with pytest.raises(GroundedResponseFormatError, match="citation syntax"):
+        GroundedCompetitorSynthesizer(client).synthesize(
+            "Question?", unified(qualitative())
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"text": ""},
+        {"text": "Claim.", "extra": True},
+        {"text": 1},
+        {},
+    ),
+)
+def test_qualitative_contract_rejects_invalid_values(payload: object) -> None:
+    client = FakeGenerationClient(json.dumps(payload))
+    with pytest.raises(GroundedResponseFormatError):
+        GroundedCompetitorSynthesizer(client).synthesize(
+            "Question?", unified(qualitative())
+        )
+
+
+def obsolete_test_financial_marker_must_be_supported_by_its_own_block() -> None:
+    evidence = unified(qualitative(), calculation())
+    marker = "[[E2:calculated_value:40.00]]"
+    client = FakeGenerationClient(
+        blocks_response(
+            [{"text": f"Unsupported margin {marker}.", "evidence_ids": ["E1"]}],
+            financial_claims=_claims_for_markers(marker),
+        )
+    )
+    with pytest.raises(FinancialGroundingError, match="cited evidence"):
+        GroundedCompetitorSynthesizer(client).synthesize("Combine.", evidence)
 
 
 def test_empty_evidence_returns_insufficient_without_provider_call() -> None:
@@ -521,7 +642,7 @@ def test_mutated_financial_value_is_rejected() -> None:
         )
 
 
-def test_unmarked_financial_number_is_rejected() -> None:
+def obsolete_test_unmarked_financial_number_is_rejected() -> None:
     client = FakeGenerationClient(response("Calculated margin was 41.00 percent [E1]."))
     with pytest.raises(FinancialGroundingError, match="bind every numeric"):
         GroundedCompetitorSynthesizer(client).synthesize(
@@ -529,7 +650,7 @@ def test_unmarked_financial_number_is_rejected() -> None:
         )
 
 
-def test_insufficient_response_cannot_fill_an_uncited_financial_value() -> None:
+def obsolete_test_insufficient_response_cannot_fill_an_uncited_financial_value() -> None:
     client = FakeGenerationClient(
         response("Evidence is insufficient, so the missing value is 999.", (), insufficient=True)
     )
@@ -539,7 +660,7 @@ def test_insufficient_response_cannot_fill_an_uncited_financial_value() -> None:
         )
 
 
-def test_qualitative_citation_cannot_hide_bare_number_when_financial_evidence_exists() -> None:
+def obsolete_test_qualitative_citation_cannot_hide_bare_number_when_financial_evidence_exists() -> None:
     client = FakeGenerationClient(response("Unsupported value is 999 [E1]."))
     with pytest.raises(FinancialGroundingError, match="bind every numeric"):
         GroundedCompetitorSynthesizer(client).synthesize(
@@ -547,7 +668,7 @@ def test_qualitative_citation_cannot_hide_bare_number_when_financial_evidence_ex
         )
 
 
-def test_financial_marker_must_use_cited_financial_evidence() -> None:
+def obsolete_test_financial_marker_must_use_cited_financial_evidence() -> None:
     evidence = unified(qualitative(), calculation())
     client = FakeGenerationClient(
         response("Claim [[E2:calculated_value:40.00]] [E1].", ("E1",))
@@ -556,7 +677,7 @@ def test_financial_marker_must_use_cited_financial_evidence() -> None:
         GroundedCompetitorSynthesizer(client).synthesize("Question?", evidence)
 
 
-def test_qualitative_evidence_cannot_authorize_financial_marker() -> None:
+def obsolete_test_qualitative_evidence_cannot_authorize_financial_marker() -> None:
     client = FakeGenerationClient(response("Claim [[E1:calculated_value:40.00]] [E1]."))
     with pytest.raises(FinancialGroundingError, match="Qualitative"):
         GroundedCompetitorSynthesizer(client).synthesize(
@@ -575,7 +696,7 @@ def test_qualitative_evidence_cannot_authorize_financial_marker() -> None:
         ("[[E1:calculated_value:40.00", "malformed marker"),
     ),
 )
-def test_malformed_role_aware_markers_are_rejected(marker: str, error: str) -> None:
+def obsolete_test_malformed_role_aware_markers_are_rejected(marker: str, error: str) -> None:
     client = FakeGenerationClient(response(f"Claim {marker} [E1]."))
     with pytest.raises(FinancialGroundingError, match=error):
         GroundedCompetitorSynthesizer(client).synthesize(
@@ -583,7 +704,7 @@ def test_malformed_role_aware_markers_are_rejected(marker: str, error: str) -> N
         )
 
 
-def test_role_aware_marker_with_unknown_evidence_is_rejected() -> None:
+def obsolete_test_role_aware_marker_with_unknown_evidence_is_rejected() -> None:
     client = FakeGenerationClient(
         response("Claim [[E99:calculated_value:40.00]] [E99].", ("E99",))
     )
@@ -593,7 +714,7 @@ def test_role_aware_marker_with_unknown_evidence_is_rejected() -> None:
         )
 
 
-def test_marker_without_structured_claim_is_rejected() -> None:
+def obsolete_test_marker_without_structured_claim_is_rejected() -> None:
     client = FakeGenerationClient(
         response(
             "Value [[E1:calculated_value:40.00]] [E1].",
@@ -606,7 +727,7 @@ def test_marker_without_structured_claim_is_rejected() -> None:
         )
 
 
-def test_structured_claim_without_marker_is_rejected() -> None:
+def obsolete_test_structured_claim_without_marker_is_rejected() -> None:
     claims = _claims_for_markers("[[E1:calculated_value:40.00]]")
     client = FakeGenerationClient(
         response("Supported claim [E1].", financial_claims=claims)
@@ -626,7 +747,7 @@ def test_structured_claim_without_marker_is_rejected() -> None:
         ("evidence_id", "E2"),
     ),
 )
-def test_marker_and_structured_claim_must_match(field: str, value: object) -> None:
+def obsolete_test_marker_and_structured_claim_must_match(field: str, value: object) -> None:
     claims = _claims_for_markers("[[E1:calculated_value:40.00]]")
     claims[0][field] = value
     client = FakeGenerationClient(
@@ -642,7 +763,7 @@ def test_marker_and_structured_claim_must_match(field: str, value: object) -> No
         )
 
 
-def test_duplicate_structured_claim_is_rejected() -> None:
+def obsolete_test_duplicate_structured_claim_is_rejected() -> None:
     claims = _claims_for_markers("[[E1:calculated_value:40.00]]")
     client = FakeGenerationClient(
         response(
@@ -656,7 +777,7 @@ def test_duplicate_structured_claim_is_rejected() -> None:
         )
 
 
-def test_structured_claim_order_must_match_marker_order() -> None:
+def obsolete_test_structured_claim_order_must_match_marker_order() -> None:
     evidence = unified(calculation("asus"), calculation("msi"))
     answer = (
         "Values [[E1:calculated_value:40.00]] and "
@@ -674,7 +795,7 @@ def test_structured_claim_order_must_match_marker_order() -> None:
     ("field", "value"),
     (("company_id", "msi"), ("rank", 2), ("value", "40.00")),
 )
-def test_comparison_claim_fields_must_match_marker_fields(
+def obsolete_test_comparison_claim_fields_must_match_marker_fields(
     field: str, value: object
 ) -> None:
     claims = _claims_for_markers("[[E1:ranked_entry:asus:1:50.00]]")
@@ -691,7 +812,7 @@ def test_comparison_claim_fields_must_match_marker_fields(
         )
 
 
-def test_change_claim_role_must_match_marker_role() -> None:
+def obsolete_test_change_claim_role_must_match_marker_role() -> None:
     engine = comparison_engine(
         *margin_facts("asus", 2024, "30"),
         *margin_facts("asus", 2025, "40"),
@@ -707,6 +828,34 @@ def test_change_claim_role_must_match_marker_role() -> None:
     )
     with pytest.raises(FinancialGroundingError):
         GroundedCompetitorSynthesizer(client).synthesize("Change?", evidence)
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "An arbitrary 7 appears.",
+        "The fiscal year is 2025.",
+        "Rank 1 leads.",
+        "Margin is 40%.",
+        "The value is 40.00.",
+        "1. Numbered item.",
+    ),
+)
+def test_qualitative_digits_do_not_fail_or_create_financial_claims(text: str) -> None:
+    client = FakeGenerationClient(json.dumps({"text": text}))
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        "Question?", unified(qualitative())
+    )
+    assert result.answer_text == f"{text} [E1]"
+    assert result.financial_claims == ()
+
+
+def test_provider_text_without_digits_is_accepted() -> None:
+    client = FakeGenerationClient(json.dumps({"text": "Evidence supports the strategy."}))
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        "Question?", unified(qualitative())
+    )
+    assert result.answer_text == "Evidence supports the strategy. [E1]"
 
 
 @pytest.mark.parametrize(
@@ -731,7 +880,7 @@ def test_strict_financial_claim_schema_rejects_invalid_values(claims: object) ->
         )
 
 
-def test_financial_claims_key_is_required_even_for_qualitative_response() -> None:
+def test_obsolete_combined_contract_is_rejected() -> None:
     client = FakeGenerationClient(
         json.dumps(
             {
@@ -747,16 +896,6 @@ def test_financial_claims_key_is_required_even_for_qualitative_response() -> Non
         )
 
 
-def test_structured_claim_evidence_must_be_normally_cited() -> None:
-    evidence = unified(qualitative(), calculation())
-    claims = _claims_for_markers("[[E2:calculated_value:40.00]]")
-    client = FakeGenerationClient(
-        response("Qualitative claim [E1].", ("E1",), financial_claims=claims)
-    )
-    with pytest.raises(FinancialGroundingError, match="normally cited"):
-        GroundedCompetitorSynthesizer(client).synthesize("Question?", evidence)
-
-
 def test_strict_json_response_contract() -> None:
     client = FakeGenerationClient("not json")
     with pytest.raises(GroundedResponseFormatError, match="JSON"):
@@ -768,17 +907,10 @@ def test_strict_json_response_contract() -> None:
 @pytest.mark.parametrize(
     "payload",
     (
-        {
-            "answer_text": "Claim [E1].",
-            "cited_evidence_ids": ["E1"],
-            "financial_claims": [],
-            "insufficient": False,
-            "unexpected": True,
-        },
-        {"answer_text": 1, "cited_evidence_ids": ["E1"], "financial_claims": [], "insufficient": False},
-        {"answer_text": "Claim [E1].", "cited_evidence_ids": "E1", "financial_claims": [], "insufficient": False},
-        {"answer_text": "Claim [E1].", "cited_evidence_ids": ["E1"], "financial_claims": [], "insufficient": "no"},
-        {"answer_text": "Claim [E1].", "cited_evidence_ids": ["E1"], "financial_claims": []},
+        {"text": "Claim.", "unexpected": True},
+        {"text": 1},
+        {},
+        {"claims": []},
     ),
 )
 def test_strict_json_rejects_schema_or_type_errors(payload: dict[str, object]) -> None:
@@ -803,8 +935,8 @@ def test_prompt_distinguishes_reported_and_calculated_evidence() -> None:
         "Compare evidence.", unified(fact(), calculation())
     )
     assert "financial_fact" in prompt and "financial_calculation" in prompt
-    assert "reported directly" in prompt
-    assert "Python-calculated" in prompt
+    assert "reported_source_value" in prompt
+    assert "calculated_value" in prompt
 
 
 def test_prompt_serialization_has_no_private_paths_or_provider_objects() -> None:
@@ -822,3 +954,232 @@ def test_result_is_immutable_and_provider_is_only_an_abstraction() -> None:
     ).synthesize("Question?", unified(qualitative()))
     with pytest.raises(FrozenInstanceError):
         result.answer_text = "changed"  # type: ignore[misc]
+    assert result.generation_provider == "fake"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"text": "Valid", "extra": True},
+        {"text": ""},
+        {"text": "   "},
+        {"text": None},
+        {"wrong": "Valid"},
+    ),
+)
+def test_production_qualitative_schema_is_exact(payload: object) -> None:
+    with pytest.raises(GroundedResponseFormatError):
+        GroundedCompetitorSynthesizer(
+            FakeGenerationClient(json.dumps(payload))
+        ).synthesize("Question?", unified(qualitative()))
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Claim [E1].",
+        "Claim [E1, E2].",
+        "Claim [E99].",
+        "Claim [E2, E1].",
+    ),
+)
+def test_provider_cannot_control_qualitative_citations(text: str) -> None:
+    with pytest.raises(GroundedResponseFormatError, match="citation syntax"):
+        GroundedCompetitorSynthesizer(
+            FakeGenerationClient(json.dumps({"text": text}))
+        ).synthesize("Question?", unified(qualitative(), qualitative("msi")))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"claims": [], "extra": True},
+        {"claims": "bad"},
+        {"claims": {}},
+        {},
+        [],
+    ),
+)
+def test_production_financial_root_contract_is_strict(payload: object) -> None:
+    with pytest.raises(GroundedSynthesisError):
+        GroundedCompetitorSynthesizer(
+            FakeGenerationClient(json.dumps(payload))
+        ).synthesize("Margin?", unified(calculation()))
+
+
+@pytest.mark.parametrize("count", (1, 2, 3))
+def test_scope_citation_order_is_stable_for_selected_evidence(count: int) -> None:
+    items = (qualitative("asus"), qualitative("msi"), qualitative("gigabyte"))[:count]
+    result = GroundedCompetitorSynthesizer(
+        FakeGenerationClient(json.dumps({"text": "Scoped narrative."}))
+    ).synthesize("Question?", unified(*items))
+    expected = tuple(f"E{index}" for index in range(1, count + 1))
+    assert result.cited_evidence_ids == expected
+    assert result.answer_text.endswith("[" + ", ".join(expected) + "]")
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_financial_claim_output_preserves_validated_provider_order(reverse: bool) -> None:
+    claims = _claims_for_markers(
+        "[[E1:calculated_value:40.00]][[E2:calculated_value:40.00]]"
+    )
+    if reverse:
+        claims.reverse()
+    result = GroundedCompetitorSynthesizer(
+        FakeGenerationClient(json.dumps({"claims": claims}))
+    ).synthesize("Question?", unified(calculation("asus"), calculation("msi")))
+    assert result.cited_evidence_ids == tuple(
+        dict.fromkeys(claim["evidence_id"] for claim in claims)
+    )
+
+
+def test_result_exposes_scope_level_qualitative_provenance_state() -> None:
+    result = GroundedCompetitorSynthesizer(
+        FakeGenerationClient(json.dumps({"text": "Scoped narrative."}))
+    ).synthesize("Question?", unified(qualitative()))
+    assert result.qualitative_coverage is QualitativeCoverage.COMPLETE
+    assert result.missing_qualitative_companies == ()
+
+
+@pytest.mark.parametrize(
+    ("items", "responses", "required_keys"),
+    (
+        ((qualitative(),), ({"text": "Narrative."},), (("text",),)),
+        ((calculation(),), ({"claims": _claims_for_markers("[[E1:calculated_value:40.00]]")},), (("claims",),)),
+        (
+            (qualitative(), calculation()),
+            ({"text": "Narrative."}, {"claims": _claims_for_markers("[[E2:calculated_value:40.00]]")}),
+            (("text",), ("claims",)),
+        ),
+    ),
+)
+def test_split_provider_calls_are_routed_by_evidence_type(
+    items: tuple[object, ...],
+    responses: tuple[dict[str, object], ...],
+    required_keys: tuple[tuple[str, ...], ...],
+) -> None:
+    client = SequenceStructuredGenerationClient(
+        [json.dumps(response) for response in responses]
+    )
+    GroundedCompetitorSynthesizer(client).synthesize("Question?", unified(*items))
+    assert tuple(tuple(schema["required"]) for schema in client.schemas) == required_keys
+
+
+def comparison():
+    engine = comparison_engine(
+        *margin_facts("asus", 2025, "50"),
+        *margin_facts("msi", 2025, "40"),
+    )
+    return engine.rank_companies("gross_margin", 2025, ("asus", "msi"))
+
+
+def change():
+    engine = comparison_engine(
+        *margin_facts("asus", 2024, "30"),
+        *margin_facts("asus", 2025, "40"),
+    )
+    return engine.compare_company_years("asus", "gross_margin", 2024, 2025)
+
+
+def claim(evidence_id: str, claim_type: str, role: str, value: str, **extra):
+    return {
+        "evidence_id": evidence_id,
+        "claim_type": claim_type,
+        "role": role,
+        "value": value,
+        **extra,
+    }
+
+
+def test_financial_schema_is_a_strict_four_family_union() -> None:
+    variants = FINANCIAL_RESPONSE_SCHEMA["properties"]["claims"]["items"]["oneOf"]
+    assert len(variants) == 4
+    assert all(item["additionalProperties"] is False for item in variants)
+    assert all("pattern" not in json.dumps(item) for item in variants)
+    assert all("uniqueItems" not in json.dumps(item) for item in variants)
+
+
+def test_mixed_fact_and_comparison_use_one_financial_call_and_render() -> None:
+    evidence = unified(fact(), comparison())
+    claims = [
+        claim("E1", "reported_fact", "reported_value", "100"),
+        claim("E2", "comparison_entry", "ranked_entry", "50.00", company_id="asus", rank=1),
+    ]
+    client = FakeStructuredGenerationClient(json.dumps({"claims": claims}))
+    result = GroundedCompetitorSynthesizer(client).synthesize("Compare.", evidence)
+    rendered = render_competitor_answer(result, evidence)
+    assert len(client.prompts) == 1
+    assert result.cited_evidence_ids == ("E1", "E2")
+    assert tuple(item.claim_type.value for item in result.financial_claims) == (
+        "reported_fact", "comparison_entry"
+    )
+    assert len(rendered.citations) == 2
+
+
+def test_mixed_calculated_and_comparison_use_one_financial_call() -> None:
+    evidence = unified(calculation(), comparison())
+    claims = [
+        claim("E1", "calculated_metric", "calculated_value", "40.00"),
+        claim("E2", "comparison_entry", "ranked_entry", "50.00", company_id="asus", rank=1),
+    ]
+    client = FakeStructuredGenerationClient(json.dumps({"claims": claims}))
+    result = GroundedCompetitorSynthesizer(client).synthesize("Compare.", evidence)
+    assert len(client.prompts) == 1
+    assert [item.evidence_id for item in result.financial_claims] == ["E1", "E2"]
+
+
+def test_all_financial_claim_families_coexist_in_provider_order() -> None:
+    evidence = unified(fact(), calculation(), comparison(), change())
+    claims = [
+        claim("E1", "reported_fact", "reported_value", "100"),
+        claim("E2", "calculated_metric", "calculated_value", "40.00"),
+        claim("E3", "comparison_entry", "ranked_entry", "50.00", company_id="asus", rank=1),
+        claim("E4", "financial_change_value", "percentage_point_change", "10.00"),
+    ]
+    client = FakeStructuredGenerationClient(json.dumps({"claims": claims}))
+    result = GroundedCompetitorSynthesizer(client).synthesize("Analyze.", evidence)
+    assert len(client.prompts) == 1
+    assert tuple(item.claim_type.value for item in result.financial_claims) == (
+        "reported_fact", "calculated_metric", "comparison_entry",
+        "financial_change_value",
+    )
+    assert result.cited_evidence_ids == ("E1", "E2", "E3", "E4")
+    assert len(render_competitor_answer(result, evidence).citations) == 4
+
+
+@pytest.mark.parametrize(
+    ("evidence", "bad_claim"),
+    (
+        (lambda: unified(fact()), claim("E1", "reported_fact", "reported_value", "100", company_id="asus", rank=1)),
+        (lambda: unified(calculation()), claim("E1", "calculated_metric", "calculated_value", "40.00", company_id="asus", rank=1)),
+        (lambda: unified(comparison()), claim("E1", "comparison_entry", "ranked_entry", "50.00", company_id="asus")),
+        (lambda: unified(comparison()), claim("E1", "comparison_entry", "ranked_entry", "50.00", rank=1)),
+        (lambda: unified(change()), claim("E1", "financial_change_value", "percentage_point_change", "10.00", company_id="asus", rank=1)),
+    ),
+)
+def test_family_specific_extra_and_required_fields_remain_strict(evidence, bad_claim) -> None:
+    with pytest.raises(GroundedResponseFormatError):
+        GroundedCompetitorSynthesizer(
+            FakeGenerationClient(json.dumps({"claims": [bad_claim]}))
+        ).synthesize("Question?", evidence())
+
+
+def test_partial_qualitative_and_complete_financial_render_with_real_synthesizer() -> None:
+    plan = DeterministicQuestionRouter().plan(
+        "Compare ASUS and MSI AI strategies and gross margins in 2025."
+    )
+    evidence = unified(qualitative("asus"), comparison())
+    responses = [
+        json.dumps({"text": "Available strategy evidence."}),
+        json.dumps({"claims": [
+            claim("E2", "comparison_entry", "ranked_entry", "50.00", company_id="asus", rank=1)
+        ]}),
+    ]
+    client = SequenceStructuredGenerationClient(responses)
+    result = GroundedCompetitorSynthesizer(client).synthesize(plan.question, evidence, plan)
+    rendered = render_competitor_answer(result, evidence)
+    assert result.status is GroundedSynthesisStatus.PARTIAL
+    assert result.qualitative_coverage is QualitativeCoverage.PARTIAL
+    assert result.missing_qualitative_companies == ("msi",)
+    assert len(client.prompts) == 2
+    assert len(rendered.citations) == 2

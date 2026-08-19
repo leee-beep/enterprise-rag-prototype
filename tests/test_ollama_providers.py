@@ -56,6 +56,35 @@ def test_ollama_generation_success_and_disables_streaming():
     assert client.generate("prompt") == "local answer"
     assert transport.calls == [("http://localhost:11434/api/generate", {"model":"chat-model","prompt":"prompt","stream":False}, 2)]
 
+def test_ollama_structured_generation_passes_schema_and_disables_thinking():
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    client, transport = generation_client({"response": '{"answer":"ok"}'})
+    assert client.generate_structured("prompt", schema) == '{"answer":"ok"}'
+    assert transport.calls == [
+        (
+            "http://localhost:11434/api/generate",
+            {
+                "model": "chat-model",
+                "prompt": "prompt",
+                "stream": False,
+                "format": schema,
+                "think": False,
+            },
+            2,
+        )
+    ]
+
+def test_ollama_structured_generation_rejects_empty_schema():
+    client, transport = generation_client({"response": '{"answer":"ok"}'})
+    with pytest.raises(ValueError, match="schema must not be empty"):
+        client.generate_structured("prompt", {})
+    assert transport.calls == []
+
 @pytest.mark.parametrize("payload", [{"response":""}, {"response":None}])
 def test_ollama_generation_rejects_empty_response(payload):
     client,_=generation_client(payload)

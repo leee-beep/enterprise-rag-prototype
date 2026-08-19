@@ -176,3 +176,27 @@ class OllamaGenerationClient:
             return validate_generated_text(result["response"])
         except GenerationValidationError:
             raise
+
+    def generate_structured(
+        self, prompt: str, schema: Mapping[str, Any]
+    ) -> str:
+        """Generate schema-constrained JSON with model reasoning disabled."""
+        prompt = validate_generation_prompt(prompt)
+        if not isinstance(schema, Mapping) or not schema:
+            raise ValueError("Structured generation schema must not be empty.")
+        result = self._transport.post_json(
+            f"{self.base_url}/api/generate",
+            {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "format": dict(schema),
+                "think": False,
+            },
+            self.timeout,
+        )
+        if not isinstance(result, dict) or "response" not in result:
+            raise OllamaResponseError(
+                "Ollama generation response must contain a response field."
+            )
+        return validate_generated_text(result["response"])

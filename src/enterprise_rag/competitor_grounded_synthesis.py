@@ -18,57 +18,112 @@ from enterprise_rag.competitor_evidence import (
     UnifiedEvidence,
     UnifiedEvidenceSet,
 )
-from enterprise_rag.competitor_planning import AnalysisPlan, PlanStatus
-from enterprise_rag.generation import GenerationClient, validate_generated_text
+from enterprise_rag.competitor_planning import AnalysisPlan, AnalysisRoute, PlanStatus
+from enterprise_rag.generation import (
+    GenerationClient,
+    StructuredGenerationClient,
+    validate_generated_text,
+)
 
 
-GROUNDED_SYNTHESIS_INSTRUCTIONS = """You are a grounded competitor-analysis writer.
-Use ONLY the supplied evidence. Every factual claim must cite one or more supplied
-evidence IDs using [E1] or [E1, E2]. Do not retrieve or introduce external knowledge.
-Do not invent evidence IDs, sources, companies, rankings, values, or missing facts.
-If evidence is insufficient, say so instead of guessing.
+QUALITATIVE_SYNTHESIS_INSTRUCTIONS = """Write a concise competitor-analysis narrative.
+Use only the supplied qualitative evidence. Do not introduce external knowledge, cite
+evidence IDs, pages, paths, URLs, or sources, and do not characterize a company for which
+no evidence was supplied. Return exactly one JSON object with a single non-empty `text`
+field. Numeric text is permitted, but it is never authoritative financial output."""
 
-Evidence types have different authority:
-- qualitative: source text from a cited document.
-- financial_fact: a value reported directly by the source statement.
-- financial_calculation: a deterministic Python-calculated value, not a reported fact.
-- financial_comparison: a deterministic supplied ranking; never rerank it.
-- financial_change: a supplied percentage-point change; never recompute it.
-
-Copy every supplied financial value and every marker field exactly. Never calculate, recalculate,
-round, convert, alter, or infer a financial value. Use only these markers:
-- reported fact: [[E1:reported_value:123.45]]
-- Python-calculated metric: [[E2:calculated_value:25.00]]
-- supplied ranking entry: [[E3:ranked_entry:example_company:1:25.00]]
-- year change: [[E4:earlier_value:20.00]], [[E4:later_value:25.00]], or
-  [[E4:percentage_point_change:5.00]]
-The examples are synthetic. For every marker, return a matching financial_claims entry.
-Use claim_type reported_fact for reported_value, calculated_metric for calculated_value,
-comparison_entry for ranked_entry, and financial_change_value for change roles. Never
-swap a ranking company, rank, or value. Never use a
-calculation input as its calculated result. Never relabel a reported fact as calculated,
-or an earlier/later value as the percentage-point change. Do not write bare numbers when
-citing financial evidence, including years, ranks, and tickers. Every marker's evidence
-must also appear as a normal citation. The application validates and removes markers.
-
-Return exactly one JSON object with these keys and no others:
-{"answer_text":"grounded prose with citations","cited_evidence_ids":["E1"],
-"financial_claims":[{"evidence_id":"E1","claim_type":"reported_fact",
-"role":"reported_value","value":"123.45"}],"insufficient":false}
-For comparison_entry only, also include company_id and integer rank. For qualitative-only
-answers, financial_claims must be an empty list. Copy fields exactly; do not add fields.
-Do not wrap the JSON in Markdown fences."""
+FINANCIAL_SYNTHESIS_INSTRUCTIONS = """Select structured financial claims from only the
+supplied trusted financial evidence. Do not write prose. Never calculate, recalculate,
+round, convert, alter, or infer a value. Copy the exact evidence ID, claim type, role,
+Decimal value, company ID, and rank where applicable. Return exactly one JSON object
+with a `claims` array and no other root fields."""
 
 _EVIDENCE_ID = re.compile(r"E[1-9]\d*")
 _CITATION_GROUP = re.compile(r"\[((?:E\d+\s*(?:,\s*E\d+\s*)*))\]")
-_MARKER_TOKEN = re.compile(r"\[\[([^\[\]\r\n]*)\]\]")
 _DECIMAL_TEXT = re.compile(r"[-+]?\d+(?:\.\d+)?")
-_BARE_NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?(?!\w)")
-_RESPONSE_KEYS = frozenset(
-    {"answer_text", "cited_evidence_ids", "financial_claims", "insufficient"}
-)
+_QUALITATIVE_RESPONSE_KEYS = frozenset({"text"})
+_FINANCIAL_RESPONSE_KEYS = frozenset({"claims"})
 _BASIC_CLAIM_KEYS = frozenset({"evidence_id", "claim_type", "role", "value"})
 _COMPARISON_CLAIM_KEYS = _BASIC_CLAIM_KEYS | {"company_id", "rank"}
+
+QUALITATIVE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+    },
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+FINANCIAL_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "claims": {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "evidence_id": {"type": "string"},
+                            "claim_type": {"type": "string", "enum": ["reported_fact"]},
+                            "role": {"type": "string", "enum": ["reported_value"]},
+                            "value": {"type": "string"},
+                        },
+                        "required": ["evidence_id", "claim_type", "role", "value"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "evidence_id": {"type": "string"},
+                            "claim_type": {"type": "string", "enum": ["calculated_metric"]},
+                            "role": {"type": "string", "enum": ["calculated_value"]},
+                            "value": {"type": "string"},
+                        },
+                        "required": ["evidence_id", "claim_type", "role", "value"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "evidence_id": {"type": "string"},
+                            "claim_type": {"type": "string", "enum": ["comparison_entry"]},
+                            "role": {"type": "string", "enum": ["ranked_entry"]},
+                            "value": {"type": "string"},
+                            "company_id": {"type": "string"},
+                            "rank": {"type": "integer"},
+                        },
+                        "required": [
+                            "evidence_id", "claim_type", "role", "value",
+                            "company_id", "rank",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "evidence_id": {"type": "string"},
+                            "claim_type": {"type": "string", "enum": ["financial_change_value"]},
+                            "role": {
+                                "type": "string",
+                                "enum": [
+                                    "earlier_value", "later_value",
+                                    "percentage_point_change",
+                                ],
+                            },
+                            "value": {"type": "string"},
+                        },
+                        "required": ["evidence_id", "claim_type", "role", "value"],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+        },
+    },
+    "required": ["claims"],
+    "additionalProperties": False,
+}
 
 
 class GroundedSynthesisError(RuntimeError):
@@ -93,7 +148,17 @@ class FinancialGroundingError(GroundedSynthesisError):
 
 class GroundedSynthesisStatus(str, Enum):
     GROUNDED = "grounded"
+    PARTIAL = "partial"
     INSUFFICIENT = "insufficient"
+
+
+class QualitativeCoverage(str, Enum):
+    """Python-owned company coverage for qualitative generation."""
+
+    NOT_REQUESTED = "not_requested"
+    INSUFFICIENT = "insufficient"
+    PARTIAL = "partial"
+    COMPLETE = "complete"
 
 
 class FinancialClaimType(str, Enum):
@@ -123,10 +188,17 @@ class GroundedSynthesisResult:
     financial_claims: tuple[ValidatedFinancialClaim, ...]
     generation_provider: str | None
     generation_model: str | None
+    qualitative_coverage: QualitativeCoverage = QualitativeCoverage.NOT_REQUESTED
+    missing_qualitative_companies: tuple[str, ...] = ()
 
 
 class GroundedCompetitorSynthesizer:
-    """Generate prose from trusted evidence without orchestration or calculation."""
+    """Split qualitative prose and financial claims, then combine in Python.
+
+    Qualitative provenance is scope-level: every selected qualitative item supplied to
+    generation authorizes the narrative as a whole. Financial provenance remains
+    claim-level through validated structured claims.
+    """
 
     def __init__(self, generation_client: GenerationClient) -> None:
         self._generation_client = generation_client
@@ -144,44 +216,123 @@ class GroundedCompetitorSynthesizer:
             raise TypeError("analysis_plan must be an AnalysisPlan or None.")
         if analysis_plan is not None and analysis_plan.status is not PlanStatus.READY:
             return _insufficient_result(normalized_question, len(evidence))
-        if not evidence or _only_insufficient_comparisons(evidence):
+        if not evidence:
+            coverage, missing = _qualitative_coverage((), analysis_plan)
+            return _insufficient_result(
+                normalized_question,
+                0,
+                qualitative_coverage=coverage,
+                missing_qualitative_companies=missing,
+            )
+        if _only_insufficient_comparisons(evidence):
             return _insufficient_result(normalized_question, len(evidence))
 
-        prompt = build_grounded_synthesis_prompt(
-            normalized_question, evidence, analysis_plan
+        qualitative = tuple(
+            item for item in evidence if item.evidence_type is EvidenceType.QUALITATIVE
         )
-        try:
-            raw_response = validate_generated_text(
-                self._generation_client.generate(prompt)
+        financial = tuple(
+            item for item in evidence if item.evidence_type is not EvidenceType.QUALITATIVE
+        )
+        coverage, missing = _qualitative_coverage(qualitative, analysis_plan)
+        qualitative_requested = _qualitative_requested(analysis_plan, qualitative)
+        if qualitative_requested and not qualitative and not financial:
+            return _insufficient_result(
+                normalized_question,
+                len(evidence),
+                qualitative_coverage=QualitativeCoverage.INSUFFICIENT,
+                missing_qualitative_companies=missing,
             )
-        except Exception as exc:
-            raise GroundedGenerationError(
-                "Grounded competitor generation failed safely."
-            ) from exc
-        parsed = _parse_response(raw_response, evidence)
+
+        blocks: list[str] = []
+        cited_ids: list[str] = []
+        if qualitative:
+            qualitative_text = self._generate_qualitative(
+                normalized_question, qualitative, analysis_plan
+            )
+            qualitative_ids = tuple(item.evidence_id for item in qualitative)
+            blocks.append(qualitative_text + " [" + ", ".join(qualitative_ids) + "]")
+            cited_ids.extend(qualitative_ids)
+
+        claims: tuple[ValidatedFinancialClaim, ...] = ()
+        if financial:
+            claims = self._generate_financial(
+                normalized_question, financial, analysis_plan
+            )
+            available = {item.evidence_id: item for item in financial}
+            for claim in claims:
+                _validate_claim_against_evidence(
+                    claim, (claim.evidence_id,), available
+                )
+                blocks.append(
+                    _render_financial_claim(claim, available[claim.evidence_id])
+                    + f" [{claim.evidence_id}]"
+                )
+                if claim.evidence_id not in cited_ids:
+                    cited_ids.append(claim.evidence_id)
+
+        if not blocks:
+            return _insufficient_result(normalized_question, len(evidence))
         status = (
-            GroundedSynthesisStatus.INSUFFICIENT
-            if parsed.insufficient
+            GroundedSynthesisStatus.PARTIAL
+            if coverage in (QualitativeCoverage.PARTIAL, QualitativeCoverage.INSUFFICIENT)
+            and qualitative_requested
             else GroundedSynthesisStatus.GROUNDED
         )
         return GroundedSynthesisResult(
             normalized_question,
-            parsed.answer_text,
-            parsed.cited_evidence_ids,
+            "\n\n".join(blocks),
+            tuple(cited_ids),
             status,
             len(evidence),
-            parsed.financial_claims,
+            claims,
             self._generation_client.provider,
             self._generation_client.model,
+            coverage,
+            missing,
         )
 
+    def _generate_qualitative(
+        self,
+        question: str,
+        evidence: tuple[UnifiedEvidence, ...],
+        plan: AnalysisPlan | None,
+    ) -> str:
+        raw = self._generate_response(
+            build_qualitative_synthesis_prompt(question, evidence, plan),
+            QUALITATIVE_RESPONSE_SCHEMA,
+        )
+        return _parse_qualitative_response(raw)
 
-@dataclass(frozen=True)
-class _ParsedResponse:
-    answer_text: str
-    cited_evidence_ids: tuple[str, ...]
-    financial_claims: tuple[ValidatedFinancialClaim, ...]
-    insufficient: bool
+    def _generate_financial(
+        self,
+        question: str,
+        evidence: tuple[UnifiedEvidence, ...],
+        plan: AnalysisPlan | None,
+    ) -> tuple[ValidatedFinancialClaim, ...]:
+        raw = self._generate_response(
+            build_financial_synthesis_prompt(question, evidence, plan),
+            _financial_response_schema(evidence),
+        )
+        claims = _parse_financial_response(raw)
+        if not claims:
+            raise FinancialGroundingError(
+                "Financial generation must return at least one trusted claim."
+            )
+        return claims
+
+    def _generate_response(self, prompt: str, schema: dict[str, object]) -> str:
+        try:
+            if isinstance(self._generation_client, StructuredGenerationClient):
+                generated = self._generation_client.generate_structured(
+                    prompt, schema
+                )
+            else:
+                generated = self._generation_client.generate(prompt)
+            return validate_generated_text(generated)
+        except Exception as exc:
+            raise GroundedGenerationError(
+                "Grounded competitor generation failed safely."
+            ) from exc
 
 
 def build_grounded_synthesis_prompt(
@@ -189,163 +340,144 @@ def build_grounded_synthesis_prompt(
     evidence: UnifiedEvidenceSet,
     analysis_plan: AnalysisPlan | None = None,
 ) -> str:
-    """Build a deterministic prompt without executing planning or evidence creation."""
+    """Backward-compatible prompt helper for all supplied evidence."""
     normalized_question = _required_text("question", question)
     if not isinstance(evidence, UnifiedEvidenceSet):
         raise TypeError("evidence must be a UnifiedEvidenceSet.")
     plan_record = _plan_record(analysis_plan) if analysis_plan is not None else None
-    sections = [
-        GROUNDED_SYNTHESIS_INSTRUCTIONS,
-        "QUESTION:\n" + normalized_question,
-    ]
+    sections = ["QUESTION:\n" + normalized_question]
     if plan_record is not None:
         sections.append("ANALYSIS_PLAN:\n" + _json(plan_record))
-    sections.append(
-        "UNIFIED_EVIDENCE_IN_CALLER_ORDER:\n"
-        + _json([_evidence_record(item) for item in evidence])
-    )
+    sections.append("UNIFIED_EVIDENCE_IN_CALLER_ORDER:\n" + _json([_evidence_record(item) for item in evidence]))
     return "\n\n".join(sections)
 
 
-def _parse_response(raw_response: str, evidence: UnifiedEvidenceSet) -> _ParsedResponse:
+def build_qualitative_synthesis_prompt(
+    question: str,
+    evidence: tuple[UnifiedEvidence, ...],
+    analysis_plan: AnalysisPlan | None = None,
+) -> str:
+    """Build a prose-only prompt from the exact Python-owned evidence scope."""
+    return QUALITATIVE_SYNTHESIS_INSTRUCTIONS + "\n\n" + build_grounded_synthesis_prompt(
+        question, UnifiedEvidenceSet(evidence), analysis_plan
+    )
+
+
+def build_financial_synthesis_prompt(
+    question: str,
+    evidence: tuple[UnifiedEvidence, ...],
+    analysis_plan: AnalysisPlan | None = None,
+) -> str:
+    """Build a claim-only prompt from trusted financial evidence."""
+    return (
+        FINANCIAL_SYNTHESIS_INSTRUCTIONS
+        + "\n\nAUTHORIZED_CLAIMS_IN_EVIDENCE_ORDER:\n"
+        + _json(
+            [claim for item in evidence for claim in _authorized_claim_records(item)]
+        )
+        + "\n\n"
+        + build_grounded_synthesis_prompt(
+            question, UnifiedEvidenceSet(evidence), analysis_plan
+        )
+    )
+
+
+def _parse_json_object(raw_response: str, expected_keys: frozenset[str]) -> dict[str, object]:
     try:
         payload = json.loads(raw_response)
     except (json.JSONDecodeError, TypeError) as exc:
         raise GroundedResponseFormatError(
             "Grounded generation response must be one JSON object."
         ) from exc
-    if not isinstance(payload, dict) or set(payload) != _RESPONSE_KEYS:
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
         raise GroundedResponseFormatError(
             "Grounded generation response has an invalid JSON schema."
         )
-    answer_text = _required_generated_text(payload.get("answer_text"))
-    declared = payload.get("cited_evidence_ids")
-    insufficient = payload.get("insufficient")
-    if (
-        not isinstance(declared, list)
-        or not all(isinstance(item, str) and _EVIDENCE_ID.fullmatch(item) for item in declared)
-        or len(declared) != len(set(declared))
-    ):
+    return payload
+
+
+def _parse_qualitative_response(raw_response: str) -> str:
+    payload = _parse_json_object(raw_response, _QUALITATIVE_RESPONSE_KEYS)
+    text = _required_generated_text(payload.get("text"))
+    if _CITATION_GROUP.search(text):
         raise GroundedResponseFormatError(
-            "cited_evidence_ids must be a unique list of evidence IDs."
+            "Qualitative generation must not contain evidence citation syntax."
         )
-    if not isinstance(insufficient, bool):
-        raise GroundedResponseFormatError("insufficient must be a boolean.")
+    return text
 
-    available = {item.evidence_id: item for item in evidence}
-    unknown_declared = tuple(item for item in declared if item not in available)
-    cited_in_text = _citation_ids(answer_text)
-    unknown_text = tuple(item for item in cited_in_text if item not in available)
-    if unknown_declared or unknown_text:
-        raise UnknownEvidenceCitationError(
-            "Generated response referenced an unknown evidence ID."
-        )
-    if tuple(declared) != cited_in_text:
-        raise GroundedResponseFormatError(
-            "Declared evidence IDs must match citations in answer order."
-        )
-    if not insufficient and not cited_in_text:
-        raise GroundedResponseFormatError(
-            "A grounded response must cite at least one supplied evidence ID."
-        )
 
-    validated_answer, marker_claims = _validate_financial_values(
-        answer_text, cited_in_text, available
-    )
-    financial_claims = _parse_financial_claims(
-        payload.get("financial_claims"), cited_in_text, available
-    )
-    if marker_claims != financial_claims:
+def _parse_financial_response(
+    raw_response: str,
+) -> tuple[ValidatedFinancialClaim, ...]:
+    payload = _parse_json_object(raw_response, _FINANCIAL_RESPONSE_KEYS)
+    return _parse_financial_claims(payload.get("claims"))
+
+
+def _financial_response_schema(
+    evidence: tuple[UnifiedEvidence, ...],
+) -> dict[str, object]:
+    """Return one strict union schema for every supported financial evidence type."""
+    if any(not _authorized_claim_records(item) for item in evidence):
         raise FinancialGroundingError(
-            "Financial claims must match answer markers exactly and in order."
+            "Financial evidence has no supported structured claim family."
         )
-    return _ParsedResponse(
-        validated_answer, cited_in_text, financial_claims, insufficient
-    )
+    return FINANCIAL_RESPONSE_SCHEMA
 
 
-def _validate_financial_values(
-    answer_text: str,
-    cited_ids: tuple[str, ...],
-    available: dict[str, UnifiedEvidence],
-) -> tuple[str, tuple[ValidatedFinancialClaim, ...]]:
-    has_financial_evidence = any(
-        item.evidence_type is not EvidenceType.QUALITATIVE
-        for item in available.values()
-    )
-    replacements: dict[tuple[int, int], str] = {}
-    marker_claims: list[ValidatedFinancialClaim] = []
-    for marker in _MARKER_TOKEN.finditer(answer_text):
-        claim = _validate_financial_marker(marker.group(1), cited_ids, available)
-        marker_claims.append(claim)
-        replacements[marker.span()] = claim.value
-
-    if len(marker_claims) != len(set(marker_claims)):
-        raise FinancialGroundingError("Duplicate financial markers are not allowed.")
-
-    text_without_markers = _replace_markers(answer_text, replacements, replacement="")
-    if "[[" in text_without_markers or "]]" in text_without_markers:
-        raise FinancialGroundingError("Generated response contains a malformed marker.")
-    text_without_citations = _CITATION_GROUP.sub("", text_without_markers)
-    if has_financial_evidence and _BARE_NUMBER.search(text_without_citations):
-        raise FinancialGroundingError(
-            "Financial responses must bind every numeric claim to evidence."
+def _authorized_claim_records(item: UnifiedEvidence) -> tuple[dict[str, object], ...]:
+    """Serialize exact trusted claim choices without asking the model to infer roles."""
+    data = item.data
+    if isinstance(data, FinancialFactEvidenceData):
+        return ({
+            "evidence_id": item.evidence_id,
+            "claim_type": FinancialClaimType.REPORTED_FACT.value,
+            "role": "reported_value",
+            "value": str(data.source_value),
+        },)
+    if isinstance(data, FinancialCalculationEvidenceData):
+        return ({
+            "evidence_id": item.evidence_id,
+            "claim_type": FinancialClaimType.CALCULATED_METRIC.value,
+            "role": "calculated_value",
+            "value": str(data.value),
+        },)
+    if isinstance(data, FinancialComparisonEvidenceData):
+        return tuple(
+            {
+                "evidence_id": item.evidence_id,
+                "claim_type": FinancialClaimType.COMPARISON_ENTRY.value,
+                "role": "ranked_entry",
+                "value": str(entry.value),
+                "company_id": entry.company_id,
+                "rank": entry.rank,
+            }
+            for entry in data.ranked_entries
         )
-    return _replace_markers(answer_text, replacements), tuple(marker_claims)
-
-
-def _validate_financial_marker(
-    marker_text: str,
-    cited_ids: tuple[str, ...],
-    available: dict[str, UnifiedEvidence],
-) -> ValidatedFinancialClaim:
-    fields = marker_text.split(":")
-    if len(fields) < 2 or not _EVIDENCE_ID.fullmatch(fields[0]):
-        raise FinancialGroundingError("Generated response contains a malformed marker.")
-    evidence_id, role = fields[:2]
-    if evidence_id not in available:
-        raise UnknownEvidenceCitationError(
-            "Generated response referenced an unknown evidence ID."
+    if isinstance(data, FinancialChangeEvidenceData):
+        return tuple(
+            {
+                "evidence_id": item.evidence_id,
+                "claim_type": FinancialClaimType.FINANCIAL_CHANGE_VALUE.value,
+                "role": role,
+                "value": value,
+            }
+            for role, value in (
+                ("earlier_value", str(data.earlier_value)),
+                ("later_value", str(data.later_value)),
+                ("percentage_point_change", str(data.percentage_point_change)),
+            )
         )
-    if evidence_id not in cited_ids:
-        raise FinancialGroundingError(
-            "A financial value marker must reference cited evidence."
-        )
-    expected_fields = 5 if role == "ranked_entry" else 3
-    if len(fields) != expected_fields:
-        raise FinancialGroundingError("Financial marker has the wrong field count.")
-    if role == "ranked_entry":
-        rank_text = fields[3]
-        if not rank_text.isascii() or not rank_text.isdecimal():
-            raise FinancialGroundingError("Ranking marker rank must be an integer.")
-    value = fields[-1]
-    if not _DECIMAL_TEXT.fullmatch(value):
-        raise FinancialGroundingError("Financial marker has an invalid decimal value.")
-    claim_type = _claim_type_for_role(role)
-    claim = ValidatedFinancialClaim(
-        evidence_id=evidence_id,
-        claim_type=claim_type,
-        role=role,
-        value=value,
-        company_id=fields[2] if role == "ranked_entry" else None,
-        rank=int(fields[3]) if role == "ranked_entry" else None,
-    )
-    _validate_claim_against_evidence(claim, cited_ids, available)
-    return claim
+    return ()
 
 
 def _parse_financial_claims(
     value: object,
-    cited_ids: tuple[str, ...],
-    available: dict[str, UnifiedEvidence],
 ) -> tuple[ValidatedFinancialClaim, ...]:
     if not isinstance(value, list):
         raise GroundedResponseFormatError("financial_claims must be a list.")
     claims = tuple(_parse_financial_claim(item) for item in value)
     if len(claims) != len(set(claims)):
         raise FinancialGroundingError("Duplicate financial claims are not allowed.")
-    for claim in claims:
-        _validate_claim_against_evidence(claim, cited_ids, available)
     return claims
 
 
@@ -391,23 +523,6 @@ def _parse_financial_claim(value: object) -> ValidatedFinancialClaim:
     return ValidatedFinancialClaim(
         evidence_id, claim_type, role, exact_value, company_id, rank
     )
-
-
-def _claim_type_for_role(role: str) -> FinancialClaimType:
-    mapping = {
-        "reported_value": FinancialClaimType.REPORTED_FACT,
-        "calculated_value": FinancialClaimType.CALCULATED_METRIC,
-        "ranked_entry": FinancialClaimType.COMPARISON_ENTRY,
-        "earlier_value": FinancialClaimType.FINANCIAL_CHANGE_VALUE,
-        "later_value": FinancialClaimType.FINANCIAL_CHANGE_VALUE,
-        "percentage_point_change": FinancialClaimType.FINANCIAL_CHANGE_VALUE,
-    }
-    try:
-        return mapping[role]
-    except KeyError as exc:
-        raise FinancialGroundingError(
-            "Financial marker role or value is unsupported."
-        ) from exc
 
 
 def _validate_claim_against_evidence(
@@ -476,29 +591,51 @@ def _claim_matches(item: UnifiedEvidence, claim: ValidatedFinancialClaim) -> boo
     return False
 
 
-def _replace_markers(
-    text: str,
-    replacements: dict[tuple[int, int], str],
-    *,
-    replacement: str | None = None,
+def _render_financial_claim(
+    claim: ValidatedFinancialClaim,
+    item: UnifiedEvidence,
 ) -> str:
-    parts: list[str] = []
-    cursor = 0
-    for (start, end), value in replacements.items():
-        parts.append(text[cursor:start])
-        parts.append(value if replacement is None else replacement)
-        cursor = end
-    parts.append(text[cursor:])
-    return "".join(parts)
-
-
-def _citation_ids(answer_text: str) -> tuple[str, ...]:
-    ordered: list[str] = []
-    for group in _CITATION_GROUP.findall(answer_text):
-        for evidence_id in _EVIDENCE_ID.findall(group):
-            if evidence_id not in ordered:
-                ordered.append(evidence_id)
-    return tuple(ordered)
+    """Render only trusted, already-validated evidence fields; never recalculate."""
+    data = item.data
+    if isinstance(data, FinancialFactEvidenceData):
+        return (
+            f"{item.company_name} {item.fiscal_year} {data.metric} reported value: "
+            f"{claim.value} {data.source_unit}"
+        )
+    if isinstance(data, FinancialCalculationEvidenceData):
+        return (
+            f"{item.company_name} {item.fiscal_year} {data.metric} calculated value: "
+            f"{claim.value} {data.unit}"
+        )
+    if isinstance(data, FinancialComparisonEvidenceData):
+        entry = next(
+            entry
+            for entry in data.ranked_entries
+            if (entry.company_id, entry.rank, str(entry.value))
+            == (claim.company_id, claim.rank, claim.value)
+        )
+        return (
+            f"Rank {entry.rank} - {entry.company_name} {entry.fiscal_year} "
+            f"{entry.metric}: {claim.value} {entry.unit}"
+        )
+    if isinstance(data, FinancialChangeEvidenceData):
+        if claim.role == "earlier_value":
+            return (
+                f"{item.company_name} {data.metric} in {data.earlier_year}: "
+                f"{claim.value} {data.unit}"
+            )
+        if claim.role == "later_value":
+            return (
+                f"{item.company_name} {data.metric} in {data.later_year}: "
+                f"{claim.value} {data.unit}"
+            )
+        return (
+            f"{item.company_name} {data.metric} change from {data.earlier_year} to "
+            f"{data.later_year}: {claim.value} percentage points"
+        )
+    raise FinancialGroundingError(
+        "Financial claim cannot be rendered from the supplied evidence type."
+    )
 
 
 def _evidence_record(item: UnifiedEvidence) -> dict[str, object]:
@@ -621,7 +758,38 @@ def _only_insufficient_comparisons(evidence: UnifiedEvidenceSet) -> bool:
     )
 
 
-def _insufficient_result(question: str, evidence_count: int) -> GroundedSynthesisResult:
+def _qualitative_requested(
+    plan: AnalysisPlan | None,
+    qualitative: tuple[UnifiedEvidence, ...],
+) -> bool:
+    if plan is None:
+        return bool(qualitative)
+    return plan.route in (AnalysisRoute.QUALITATIVE, AnalysisRoute.COMBINED)
+
+
+def _qualitative_coverage(
+    qualitative: tuple[UnifiedEvidence, ...],
+    plan: AnalysisPlan | None,
+) -> tuple[QualitativeCoverage, tuple[str, ...]]:
+    if not _qualitative_requested(plan, qualitative):
+        return QualitativeCoverage.NOT_REQUESTED, ()
+    requested = plan.requested_companies if plan is not None else ()
+    present = {item.company_id for item in qualitative if item.company_id is not None}
+    missing = tuple(company for company in requested if company not in present)
+    if not qualitative:
+        return QualitativeCoverage.INSUFFICIENT, missing
+    if missing:
+        return QualitativeCoverage.PARTIAL, missing
+    return QualitativeCoverage.COMPLETE, ()
+
+
+def _insufficient_result(
+    question: str,
+    evidence_count: int,
+    *,
+    qualitative_coverage: QualitativeCoverage = QualitativeCoverage.NOT_REQUESTED,
+    missing_qualitative_companies: tuple[str, ...] = (),
+) -> GroundedSynthesisResult:
     return GroundedSynthesisResult(
         question,
         "The supplied evidence is insufficient to answer this question.",
@@ -631,6 +799,8 @@ def _insufficient_result(question: str, evidence_count: int) -> GroundedSynthesi
         (),
         None,
         None,
+        qualitative_coverage,
+        missing_qualitative_companies,
     )
 
 
