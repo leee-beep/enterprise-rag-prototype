@@ -1,0 +1,1 @@
+export function LoadingState() { return <div className="loading-state" role="status"><span /><div><strong>Assembling grounded analysis</strong><p>Retrieving evidence · Analyzing financial data · Preparing grounded synthesis</p></div></div>; }
