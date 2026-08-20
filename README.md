@@ -1,190 +1,220 @@
-# Competitor Intelligence RAG Prototype
+# Local Competitor Intelligence RAG
 
-Built on a modular, privacy-first enterprise RAG foundation.
+A local-first competitor-intelligence system for researching ASUS, Gigabyte, and MSI. It combines balanced multi-company retrieval, deterministic financial analysis, grounded local LLM synthesis, structured provenance, a FastAPI service, and a Next.js research workspace. The project is an engineering prototype: it demonstrates authority boundaries and traceable evidence, not production security or unrestricted financial analysis.
 
-This repository contains a local-first RAG engineering prototype for retrieving and comparing evidence from official corporate disclosures from:
+<!-- Privacy-safe showcase image planned: docs/assets/showcase-overview.png -->
 
-- Gigabyte (2376)
-- ASUS (2357)
-- MSI (2377)
+## What This Project Does
 
-The current competitor workflow performs page-aware PDF ingestion, builds a separate local FAISS index for each company, and returns balanced evidence with company, year, page, and chunk provenance. It stops at retrieval: competitor-specific answer synthesis and user-facing citations are not implemented yet.
+The application accepts natural-language competitor questions and routes them through the evidence paths the question actually requires:
 
-The Git repository remains named `enterprise-rag-prototype` because the competitor application is built on a reusable generic RAG backend.
+- **Qualitative research** retrieves annual-report evidence independently for each requested company.
+- **Financial analysis** calculates a bounded set of metrics from curated, validated facts using deterministic Python code.
+- **Combined analysis** joins qualitative evidence and financial provenance before grounded synthesis.
+- **Structured citations** carry company, year, source title, page, document type, metric, and evidence identity where those fields are available.
+- **Local generation** uses Ollama for the competitor workflow; the browser communicates with a local FastAPI service.
 
-## Current status
+The resulting answer, validated financial claims, domain status, and citations are presented in a responsive Next.js research workspace.
 
-### Implemented and validated
+## Why This Architecture
 
-- Recursive TXT and Markdown loading
-- Configurable JSON and JSONL structured extraction
-- Deterministic Markdown/MDX import and cleaning
-- Deterministic structure-aware chunking with stable chunk identities
-- Provider-neutral Gemini and Ollama embedding/generation abstractions
-- Bounded Ollama embedding batches
-- Generic Gemini/Ollama generation and one-shot `RAGPipeline`
-- FAISS `IndexFlatL2` construction, scored search, persistence, and reload
-- Page-aware competitor PDF ingestion with extraction-quality checks
-- AES-compatible empty-password PDF loading and password-required PDF rejection
-- Competitor metadata, SHA-256 validation, and stable source/page/chunk identities
-- Read-only competitor PDF preflight: 12 of 12 real PDFs passed
-- Separate 2025 ASUS, Gigabyte, and MSI FAISS indexes
-- Balanced one-, two-, and three-company retrieval with equal Top-K allocation
-- Company-local relevance scores and deterministic company grouping
-- Retrieval provenance: company, ticker, year, document, PDF page, source ID, and chunk ID
-- `competitor-retrieve` diagnostic CLI
-- 326 passing offline tests
-- Private PDFs, manifests, extracted text, and generated indexes excluded from Git
+Free-form generation should not be the authority for financial calculations, rankings, evidence identity, or provenance. This project separates language generation from deterministic application authority:
 
-### Not yet implemented
+- The LLM writes qualitative prose over a supplied evidence scope and selects from explicitly authorized financial claim records.
+- Python routes the question, retrieves and labels evidence, performs all financial arithmetic, validates every generated financial claim, renders financial statements, and constructs citations.
 
-- Competitor-specific Qwen comparison synthesis
-- User-facing citations or citation verification
-- Evidence-quality filtering and deduplication
-- `financial_facts.csv` or structured financial comparison
-- 2024 competitor indexes
-- Qualitative indexing of consolidated financial reports
-- Query translation, reranking, or hybrid/BM25 retrieval
-- Streamlit or another user interface
-- OCR
-- Production access controls and operational hardening
+In short: the model handles constrained language tasks; application code owns trusted facts and calculations.
 
-## Validated source scope
+## Key Capabilities
 
-The private local source collection contains official 2024 and 2025 annual reports and consolidated financial reports for all three companies. All 12 PDFs passed real extraction preflight.
+- Deterministic routing across qualitative, financial, and combined questions
+- Separate persisted FAISS indexes and balanced Top-K retrieval per company
+- Controlled query expansion, evidence-quality filtering, overlap suppression, and lightweight semantic reranking
+- Page-aware PDF ingestion with stable company/source/page/chunk identities
+- Local Ollama embeddings with bounded batch requests
+- Decimal-based margin, growth, ranking, and year-change calculations
+- Unified qualitative and financial evidence models
+- Split qualitative-prose and financial-claim generation contracts
+- Exact financial claim-to-evidence validation and Python-owned rendering
+- Structured citation and provenance responses through FastAPI
+- Presentation-only financial rendering in the Next.js frontend
+- Privacy-safe session history containing only question, timestamp, and status
 
-The current qualitative indexes contain **only**:
+## System Architecture
 
-- ASUS 2025 Annual Report
-- Gigabyte 2025 Annual Report
-- MSI 2025 Annual Report
+```mermaid
+flowchart TB
+    User[User] --> UI[Next.js research workspace]
+    UI -->|question| API[FastAPI competitor API]
+    API --> App[CompetitorIntelligenceApplication]
+    App --> Pipeline[CompetitorIntelligencePipeline]
+    Pipeline --> Router[DeterministicQuestionRouter]
 
-The other nine PDFs are not embedded. Consolidated financial reports are retained primarily as authoritative sources for a future structured financial-facts layer.
+    subgraph LocalPrivate[Local / private resources]
+        Indexes[(Persisted company FAISS indexes)]
+        Facts[(Curated financial facts)]
+        Ollama[Ollama models]
+    end
 
-### Validation results
+    subgraph Qualitative[Qualitative RAG path]
+        Embed[Query embedding]
+        Retrieve[BalancedCompetitorRetriever]
+        Controls[Expansion, filtering, deduplication, reranking]
+        QE[Qualitative evidence]
+    end
 
-| Validation | Result |
-|---|---:|
-| Real PDF preflight | 12 / 12 passed |
-| ASUS 2025 index | 461 chunks |
-| Gigabyte 2025 index | 1,149 chunks |
-| MSI 2025 index | 326 chunks |
-| Total indexed chunks | 1,936 |
-| Automated test suite | 326 passed |
+    subgraph Financial[Deterministic financial path]
+        Calculate[Calculation engine]
+        Compare[Comparison engine]
+        FE[Financial evidence and provenance]
+    end
 
-Real local Ollama indexing and retrieval were manually validated with `nomic-embed-text`. Automated provider tests remain offline and use fake clients or transports; they do not call Ollama, Gemini, localhost, or external networks.
+    Router -->|qualitative or combined| Embed
+    Ollama -. local embedding .-> Embed
+    Embed --> Indexes
+    Indexes --> Retrieve --> Controls --> QE
 
-## Competitor architecture
+    Router -->|financial or combined| Facts
+    Facts --> Calculate --> Compare --> FE
+    Calculate --> FE
+
+    QE --> Unified[Unified evidence]
+    FE --> Unified
+    Unified --> Qwen[Qwen constrained generation]
+    Ollama -. local generation .-> Qwen
+    Qwen --> Validate[Exact Python validation]
+    Validate --> Render[Python financial and citation rendering]
+    Render --> Response[Typed API response]
+    Response --> UI
+
+    classDef authority fill:#e8f5e9,stroke:#2e7d32,color:#16351f
+    classDef model fill:#fff8e1,stroke:#b7791f,color:#4a3510,stroke-dasharray:5 3
+    classDef resource fill:#eceff1,stroke:#607d8b,color:#263238
+    class API,App,Pipeline,Router,Embed,Retrieve,Controls,QE,Calculate,Compare,FE,Unified,Validate,Render,Response authority
+    class Ollama,Qwen model
+    class Indexes,Facts resource
+```
+
+Green nodes represent deterministic application authority, dashed amber nodes identify model responsibilities, and gray nodes represent local resources. Private documents, financial facts, and indexes stay outside the public repository.
+
+## Deterministic Authority vs LLM Responsibility
+
+| Deterministic Python/application authority | Local LLM responsibility |
+|---|---|
+| Question routing and supported-intent detection | Qualitative prose over the supplied evidence scope |
+| Company, year, metric, and operation selection | Structured selection from authorized financial claims |
+| Evidence IDs and company-balanced retrieval | No independent fact, rank, or citation creation |
+| Evidence filtering, deduplication, and reranking | |
+| Financial facts and Decimal calculations | |
+| Rankings, ties, and percentage-point changes | |
+| Exact financial claim validation | |
+| Financial sentence rendering | |
+| Citation construction and domain statuses | |
+
+**The LLM does not calculate financial metrics or determine trusted financial values.** Generated financial claims are accepted only when their evidence ID, type, role, value, company, and rank exactly match an authorized claim record.
+
+Qualitative provenance is currently **scope-level rather than sentence-level**. The selected qualitative evidence set authorizes the generated narrative as a whole; the system does not claim sentence-level entailment.
+
+## End-to-End Request Flows
+
+### Qualitative question
+
+> Compare ASUS and Gigabyte's AI strategies.
+
+The deterministic router selects the qualitative route. Each company index is searched independently, candidate evidence is filtered and reranked, and Qwen produces prose from only the selected evidence scope. Python assigns and returns the structured source provenance.
+
+### Financial question
+
+> Compare ASUS and MSI's 2025 gross margins.
+
+The router identifies the companies, year, metric, and comparison operation. Python loads the required curated facts, calculates each margin with `Decimal`, ranks the validated results, and creates authorized claim records. Qwen may select those records, but Python verifies and renders the final financial statements.
+
+### Combined question
+
+> Compare ASUS and Gigabyte's AI strategies and 2025 gross margins.
+
+Both evidence paths run. Qualitative annual-report evidence and deterministic financial evidence enter one unified evidence set. Split generation produces qualitative prose and authorized financial claims; application validation and rendering produce the final answer and citations.
+
+No real financial answer is stored in this public README.
+
+## Grounding and Provenance
+
+Every request receives deterministic, request-local unified evidence IDs. Evidence may represent:
+
+- A selected annual-report chunk with company, year, document, PDF page, source identity, and chunk identity
+- A reported financial fact with source provenance
+- A Python-calculated metric with formula and input facts
+- A cross-company ranking with the requested-company set and ranked calculation results
+- A same-company year change with earlier/later calculation provenance
+
+The API returns citations as structured objects rather than asking the frontend to parse citation syntax from prose. The evidence panel preserves source order and presents only safe response fields. Financial provenance is claim-level; qualitative provenance is scope-level.
+
+## Financial Authority Model
+
+Financial handling is deliberately separated from narrative generation:
+
+1. Curated trusted facts are loaded and validated from a local CSV resource.
+2. Unit normalization and calculations use Python `Decimal`, never binary floating point.
+3. Calculation results retain formula and source-fact provenance.
+4. Comparison results deterministically own ordering, ties, missing-company handling, and direction.
+5. The model receives a closed list of authorized string-valued claims.
+6. Python rejects any changed or invented value, role, rank, company, or evidence ID.
+7. Python renders the validated financial text and citations.
+
+The current calculated metric vocabulary includes gross margin, operating margin, net margin, revenue year-over-year growth, and percentage-point margin changes. Facts are curated; the application does **not** automatically extract financial values from PDFs.
+
+## Tech Stack
+
+| Area | Technologies |
+|---|---|
+| Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS, Lucide React |
+| Backend/API | Python 3.10+, FastAPI, Pydantic, Uvicorn |
+| Retrieval | FAISS `IndexFlatL2`, NumPy, persisted per-company indexes, deterministic retrieval controls |
+| Local AI | Ollama, `nomic-embed-text`, configurable local Qwen generation model |
+| Financial analysis | Python `Decimal`, deterministic calculation and comparison engines |
+| Document processing | pypdf, AES-compatible PDF handling, structure-aware chunking |
+| Quality | Pytest, ESLint, TypeScript compiler, Next.js production build |
+
+Google Gen AI remains available to the reusable generic RAG foundation, but the composed competitor-intelligence application requires local Ollama providers.
+
+## Repository Structure
 
 ```text
-Official competitor PDFs
-        |
-        v
-Private source manifest
-        |
-        v
-Metadata + SHA-256 validation
-        |
-        v
-Page-aware PDF loading
-        |
-        v
-LoadedDocument per extractable page
-        |
-        v
-Structure-aware chunking
-        |
-        v
-Local Ollama embedding
-(nomic-embed-text)
-        |
-        v
-Separate FAISS indexes
- +-----------+-----------+-----------+
- | ASUS 2025 | GIGABYTE  | MSI 2025  |
- +-----------+-----------+-----------+
-        |
-        v
-BalancedCompetitorRetriever
-(equal Top-K per company)
-        |
-        v
-Company-grouped retrieval evidence
-(company / year / page / chunk / local score)
-
-CURRENT SYSTEM STOPS HERE
-
-        |
-        v
-Planned:
-Evidence filtering
-Citation-ready context
-Qwen competitor synthesis
-Financial comparison
-User interface
+enterprise-rag-prototype/
+├── src/enterprise_rag/
+│   ├── competitor_api.py                 # FastAPI boundary
+│   ├── competitor_application.py         # Production composition
+│   ├── competitor_orchestration.py       # End-to-end competitor pipeline
+│   ├── competitor_planning.py            # Deterministic routing
+│   ├── competitor_retrieval.py           # Balanced company retrieval
+│   ├── competitor_evidence.py            # Unified evidence model
+│   ├── competitor_grounded_synthesis.py  # Split constrained synthesis
+│   ├── competitor_citations.py           # Citation/provenance rendering
+│   ├── financial_*.py                    # Facts, calculations, comparisons
+│   ├── pdf_loader.py                     # Page-aware PDF ingestion
+│   └── vector_store.py                   # FAISS persistence
+├── frontend/                             # Next.js research workspace
+├── scripts/                              # Import, cleaning, PDF preflight
+├── tests/                                # Offline unit/integration tests
+├── data/                                 # Public placeholders; private data ignored
+└── notebooks/                            # Historical Colab prototype
 ```
 
-## Balanced multi-company retrieval
+Private source documents, financial facts, manifests, extracted corpora, and generated indexes are intentionally absent.
 
-Each selected company is searched independently against its own index. For:
+## Local Setup and Runbook
 
-```text
---companies gigabyte asus msi
---top-k-per-company 2
-```
+### Prerequisites
 
-the result order is deterministic:
+- Python 3.10 or newer
+- Node.js and npm
+- Ollama running on a trusted local or organization-controlled host
+- `nomic-embed-text` and a configured local generation model such as `qwen3:8b`
+- For the full competitor demo: compatible local per-company indexes and curated financial facts that are not included in Git
 
-```text
-Gigabyte: Rank 1, Rank 2
-ASUS:     Rank 1, Rank 2
-MSI:      Rank 1, Rank 2
-```
+The repository code and automated test suite can be inspected and run without the private competitor resources. Full application composition requires those local resources.
 
-This prevents one company's corpus from consuming the entire Top-K. Raw FAISS-derived scores remain local to each company index and are not globally sorted or treated as calibrated across indexes.
-
-### Competitor retrieval CLI
-
-The diagnostic command loads existing company indexes and returns retrieved evidence:
-
-```powershell
-python -m enterprise_rag competitor-retrieve `
-  --index-root data\vector_store\competitors `
-  --companies gigabyte asus msi `
-  --top-k-per-company 2 `
-  "Compare the companies' AI strategies."
-```
-
-It prints company, company-local rank and score, source title, year, PDF page, chunk ID, and a short preview. It does **not** generate a competitor comparison answer.
-
-Example retrieval questions:
-
-- Compare Gigabyte, ASUS and MSI's AI strategies.
-- What does each company identify as a major growth driver?
-- Compare the companies' enterprise or server strategies.
-- What products or business areas does each company emphasize?
-- What does MSI say about AI servers?
-- What does Gigabyte say about AI infrastructure?
-- What does ASUS say about AI PCs?
-
-Broad English comparison queries against zh-TW reports remain experimental and do not always return equally strong evidence.
-
-## Privacy and data handling
-
-- Real competitor PDFs remain local.
-- The private source manifest remains local.
-- Extracted page text remains local.
-- Generated competitor FAISS indexes remain local.
-- `data/private/` and `data/vector_store/` are Git-ignored.
-- The repository contains code and synthetic or fictional test fixtures, not the real competitor corpus.
-
-The validated competitor workflow uses Ollama. If `OLLAMA_BASE_URL` points to a trusted local or organization-controlled service, document chunks, queries, and retrieved context remain within that environment. Ollama is not inherently private when configured to use an untrusted remote endpoint.
-
-Gemini remains an optional provider for the reusable generic RAG foundation. Selecting Gemini sends the relevant content to an external service and must follow organizational data-handling policy.
-
-## Local setup
-
-Create a virtual environment, install the editable project and copy the configuration template:
+### 1. Install the Python project
 
 ```powershell
 python -m venv .venv
@@ -193,27 +223,74 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-`pyproject.toml` is the dependency source of truth; `requirements.txt` installs the project and test extras in editable mode.
+`pyproject.toml` is the dependency source of truth. `requirements.txt` installs the editable project and test extras.
 
-### Provider configuration
+### 2. Configure the local providers
 
-Embedding and generation providers are selected independently in `.env`:
+Review `.env` and keep the competitor providers local:
 
 ```dotenv
 EMBEDDING_PROVIDER=ollama
 GENERATION_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
-OLLAMA_EMBEDDING_BATCH_SIZE=32
 OLLAMA_CHAT_MODEL=qwen3:8b
-OLLAMA_TIMEOUT_SECONDS=180
 ```
 
-Ollama and the configured models must be installed and started separately by the user. This project does not download models or start the service.
+Never commit `.env`. Confirm required models with `ollama list`; model installation and service lifecycle are managed outside this project.
 
-Gemini can be selected for the generic foundation. `GEMINI_API_KEY` is validated only before a real Gemini operation; Ollama operations do not require it. Never commit `.env`.
+### 3. Supply local application resources
 
-### Run tests
+The composed competitor backend validates that all required company indexes and the configured financial-facts resource are available. These resources are private/local prerequisites and are not downloaded or generated automatically at API startup.
+
+### 4. Start the local API
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn enterprise_rag.competitor_api:app `
+  --host 127.0.0.1 `
+  --port 8765
+```
+
+Verify readiness in another terminal:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/ready
+```
+
+`/health` confirms that the HTTP process is alive. `/ready` additionally confirms that the composed local competitor application is available.
+
+### 5. Start the frontend
+
+```powershell
+Set-Location frontend
+npm ci
+Copy-Item .env.example .env.local
+npm run dev
+```
+
+Open <http://localhost:3000>. The browser calls the configured local API URL; the backend CORS allowlist must include the frontend origin.
+
+## Example Research Questions
+
+- Compare ASUS and Gigabyte's AI strategies.
+- Compare ASUS and MSI's 2025 gross margins.
+- Compare ASUS and Gigabyte's AI strategies and 2025 gross margins.
+- How did Gigabyte's operating margin change from 2024 to 2025?
+- Compare AI server positioning across ASUS, Gigabyte, and MSI.
+
+These question texts are safe to publish; this README intentionally contains no private answers.
+
+## Testing and Validation
+
+Current verified quality gates:
+
+- **779 backend tests passed**
+- **Frontend ESLint passed**
+- **TypeScript validation passed**
+- **Next.js production build passed**
+- Real local Ollama indexing, retrieval, generation, API, and browser flows have been validated separately
+
+Run the offline backend suite:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest `
@@ -222,162 +299,54 @@ Gemini can be selected for the generic foundation. `GEMINI_API_KEY` is validated
   -ra
 ```
 
-## Competitor data setup
-
-Expected private layout:
-
-```text
-data/private/competitors/
-    source_manifest.json
-    sources/
-        asus/
-            2025/
-        gigabyte/
-            2025/
-        msi/
-            2025/
-```
-
-The manifest supplies validated company, year, document type, language, official source URL, and safe relative source path metadata. Private source data is intentionally excluded from Git.
-
-Run the read-only preflight before indexing:
+Run frontend quality checks:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\preflight_competitor_pdfs.py `
-  --source-root data\private\competitors\sources `
-  --manifest data\private\competitors\source_manifest.json
+Set-Location frontend
+npm run lint
+npm run typecheck
+npm run build
 ```
 
-Preflight validates metadata, SHA-256 identity, encryption compatibility, page extraction, and basic extraction quality. It does not write a corpus or build an index.
+Automated provider tests use fakes or mock transports. They do not require Gemini, Ollama, localhost, or external network calls.
 
-## Reusable generic RAG foundation
+## Privacy Model
 
-The generic backend remains usable independently of the competitor application:
+The public repository excludes:
 
-```text
-TXT / MD / JSON / JSONL
-        |
-        v
-LoadedDocument
-        |
-        v
-DocumentChunk
-        |
-        v
-EmbeddedChunk
-        |
-        v
-FAISS
-        |
-        v
-Retriever
-        |
-        v
-Generic RAGPipeline
-        |
-        v
-Generation provider
-```
+- Environment secrets and API credentials
+- Private source documents and extracted text
+- Curated private financial facts
+- Persisted FAISS indexes
+- Source manifests and hashes
+- Raw prompts, provider responses, and local smoke artifacts
 
-### Provider and index compatibility
+These categories are protected by Git ignore rules. The local competitor composition requires Ollama; privacy still depends on `OLLAMA_BASE_URL` pointing to a trusted local or organization-controlled service. Optional Gemini support in the generic foundation sends relevant content to an external service and must follow the applicable data-handling policy.
 
-Supported provider combinations include Gemini/Gemini, Ollama/Ollama, Gemini/Ollama, and Ollama/Gemini. Only the selected provider is called; there is no silent fallback.
+Portfolio screenshots must use clearly identified synthetic demonstration data. Real private financial values, report excerpts, source titles, paths, and URLs must not appear in committed assets.
 
-Document and query embeddings must use the same provider, model, and vector space. New indexes include `index_manifest.json`; loading rejects a known provider/model mismatch before querying. Legacy indexes without a manifest remain loadable but cannot receive this compatibility check. Competitor manifest fields are additive and do not invalidate legacy generic manifests.
+## Known Limitations
 
-### Build a generic index
+- Qualitative provenance is scope-level and does not prove sentence-level entailment.
+- Generated prose remains dependent on retrieval quality and the supplied evidence scope.
+- Supported companies, fiscal years, intents, and financial metrics are deliberately bounded.
+- The full local demo requires private resources that are not distributed in this repository.
+- Financial facts are curated rather than automatically extracted from source PDFs.
+- There is no real-time news or competitor-data ingestion.
+- There is no OCR pipeline.
+- There is no authentication, deployment, multi-user data layer, or production access-control system.
+- Generation is non-streaming and requests are retried only through explicit user action.
+- This is an engineering prototype, not a production decision system.
 
-```powershell
-python -m enterprise_rag build-index `
-  --input data\documents `
-  --output data\vector_store `
-  --verbose
-```
+## Future Work
 
-Use `--overwrite` only after reviewing an existing destination. Index publication is atomic: a complete, reloadable FAISS index, metadata file, and build manifest replace the destination together.
+- Sentence-level qualitative evidence binding
+- A public synthetic demo dataset and reproducible showcase package
+- Broader, carefully governed financial metric support
+- A richer evidence viewer
+- Controlled current-news ingestion
+- Authentication and deployment hardening
 
-### Ask with a generic persisted index
+## Reusable RAG Foundation
 
-```powershell
-python -m enterprise_rag ask `
-  --index-path data\vector_store `
-  --top-k 4 `
-  "What is retrieval-augmented generation?"
-```
-
-This generic command performs retrieval and generation through the configured providers. It does not build an index automatically and is separate from competitor comparison retrieval.
-
-### Generic `retrieve` scope
-
-The `retrieve` subcommand is a presentation boundary for an already-injected in-memory `Retriever`. It does not load an index, embed documents, generate an answer, or invoke a pipeline. Persisted competitor retrieval uses `competitor-retrieve` instead.
-
-## Markdown/MDX import and cleaning
-
-`data/raw_documents/` contains close-to-source third-party imports. `data/documents/` contains cleaned documents ready for generic ingestion. Both are local-only except for their `.gitkeep` files.
-
-Preview an import:
-
-```powershell
-python scripts/import_docs.py `
-  --source ..\langchain-docs-source\src `
-  --output data\raw_documents\langchain `
-  --dry-run `
-  --verbose
-```
-
-Preview conservative MD/MDX cleaning:
-
-```powershell
-python scripts/clean_documents.py `
-  --input data\raw_documents\langchain `
-  --output data\documents\langchain `
-  --dry-run `
-  --verbose
-```
-
-The cleaner preserves useful Markdown and fenced code while removing supported presentation-layer MDX syntax. Strict mode is the default; `--skip-invalid` explicitly permits invalid sources to be skipped and recorded. Importing or cleaning does not create embeddings or indexes.
-
-## Retrieval score semantics
-
-Generic `Retriever` results use:
-
-```text
-score = 1 / (1 + squared_l2_distance)
-```
-
-The score is a monotonic ranking signal: higher means closer within the same embedding provider, model, vector space, and FAISS index.
-
-It is **not**:
-
-- a probability
-- a confidence score
-- an accuracy percentage
-
-For balanced competitor retrieval, scores from different company indexes must not be compared as globally calibrated values.
-
-## Known limitations
-
-- English-to-zh-TW retrieval is useful but inconsistent.
-- Table-heavy annual-report pages can pollute retrieval.
-- Adjacent overlapping chunks may both be returned.
-- Balanced Top-K guarantees company coverage, not evidence quality.
-- There is no reranker, query translation, or hybrid retrieval.
-- Competitor synthesis and user-facing citations are not implemented.
-- There is no structured financial-analysis engine or UI.
-- OCR is not supported.
-- This is an engineering prototype, not a production-ready application.
-
-## Roadmap
-
-1. Improve retrieval quality with table/noise filtering and evidence deduplication.
-2. Produce citation-ready evidence.
-3. Add guarded Qwen competitor comparison synthesis.
-4. Build 2024 historical competitor indexes.
-5. Add a curated `financial_facts.csv` layer.
-6. Implement structured financial comparison.
-7. Add a user-facing interface.
-8. Add evaluation, access controls, and production hardening.
-
-## Historical notebook
-
-The original Colab notebook is preserved as historical proof of concept and reference material. It is not the canonical implementation; the modular code under `src/enterprise_rag/` is the source of truth.
+The competitor application is built on reusable document loading, structure-aware chunking, provider abstractions, FAISS persistence, retrieval, and generic RAG pipeline modules. Gemini remains an optional provider for that generic foundation. The original Colab notebook is preserved only as historical reference; modular code under `src/enterprise_rag/` is the source of truth.

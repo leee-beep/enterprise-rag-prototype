@@ -1,77 +1,30 @@
-# Enterprise RAG Prototype 開發紀錄
+# Enterprise RAG Prototype — Historical Development Note
 
-## Milestone 1：Modular RAG Baseline
+> This file preserves a concise record of the project's early engineering foundation. It is not a complete milestone chronology. See [README.md](README.md) for the current competitor-intelligence architecture, setup, capabilities, and limitations.
 
-- TXT、Markdown、JSON、JSONL ingestion
-- Character-based chunking 與 metadata 保留
-- EmbeddedChunk 與 in-memory FAISS IndexFlatL2
+## Early modular RAG foundation
+
+- TXT, Markdown, JSON, and JSONL ingestion
+- Deterministic document and chunk identities
+- Structure-aware chunking with metadata preservation
+- `EmbeddedChunk` and FAISS `IndexFlatL2`
+- Persisted index metadata and provider/model compatibility checks
 - Offline test baseline
 
-## Milestone 2：Local LLM Foundation
+## Local provider foundation
 
-- Settings
-  - Embedding 與 Generation provider 可獨立選擇
-  - Gemini / Ollama models、base URL、timeout
-  - Provider 正規化與驗證
-  - Gemini API Key 延遲驗證
+- Independent embedding and generation provider settings
+- Gemini and Ollama adapters behind shared client protocols
+- Factory-owned provider selection
+- Ollama `/api/embed` batching and non-streaming `/api/generate`
+- Provider response, vector dimension, finite-value, timeout, and connection validation
+- Fake SDK clients and transports for offline tests
 
-- Provider Architecture
-  - EmbeddingClient
-  - GenerationClient
-  - GeminiEmbeddingClient
-  - GeminiGenerationClient
-  - OllamaEmbeddingClient
-  - OllamaGenerationClient
-  - create_embedding_client
-  - create_generation_client
+## Retrieval foundation
 
-- Ollama HTTP
-  - Python standard library `urllib.request`
-  - `/api/embed` batch embedding
-  - `/api/generate` non-streaming generation
-  - HTTP、timeout、connection、JSON 與 response schema 錯誤分類
+- Provider-independent query embedding and retrieval
+- FAISS scored search with stable chunk metadata
+- Persisted index load and validation
+- Generic retrieval, generation, and one-shot RAG pipeline boundaries
 
-- Validation
-  - 空向量、向量數量、維度、NaN、Infinity
-  - 空白 generation response
-  - 所有 provider tests 使用 mock SDK 或 fake transport，不呼叫網路
-
-## 目前資料流
-
-```text
-TXT / MD / JSON / JSONL
-↓
-LoadedDocument
-↓
-DocumentChunk
-↓
-Gemini 或 Ollama Embedding
-↓
-EmbeddedChunk
-↓
-In-memory FAISS
-```
-
-Generation provider 已可獨立建立並接受 prompt，但尚未連接 Retriever context。
-
-## 重要限制
-
-- 建立 index 與查詢 index 必須使用相同 embedding provider、model 與向量空間。
-- 尚未實作 index manifest，因此目前需由使用者自行維持相容性。
-- 尚未執行真實 Gemini 或 Ollama integration test。
-- 完整 Pipeline、citations、PDF、API/UI 尚未完成。
-- CLI retrieve 呈現層已完成，但 standalone index loading 尚未完成。
-## Milestone 3：Retriever Foundation
-
-- RetrievalResult
-  - finite relevance score
-  - EmbeddedChunk reference
-  - copied, canonical, read-only metadata
-- QueryEmbeddingClient 最小介面
-- Provider-independent Retriever
-- FAISS `search_with_scores()` 回傳原始 squared L2 distance
-- relevance score：`1 / (1 + squared_l2_distance)`，只適合同模型、同 index 內比較
-- Top-K、排序、空 index、query vector 與 metadata 驗證
-- `retrieve` CLI 輸入與輸出格式
-- CLI 未注入 in-memory Retriever 時不顯示 traceback
-- 尚未實作 persistence、standalone index loading、Generation 或完整 Pipeline
+The project later evolved into the local Competitor Intelligence RAG application documented in the root README. The original Colab notebook remains historical reference only; modular code under `src/enterprise_rag/` is the implementation source of truth.
