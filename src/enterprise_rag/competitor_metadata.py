@@ -14,10 +14,23 @@ COMPANY_TICKERS = {
     "asus": "2357",
     "msi": "2377",
 }
+COMPANY_NAMES = {
+    "gigabyte": "Gigabyte",
+    "asus": "ASUS",
+    "msi": "MSI",
+}
 ALLOWED_FISCAL_YEARS = frozenset({2024, 2025})
 ALLOWED_PERIODS = frozenset({"FY"})
 ALLOWED_DOCUMENT_TYPES = frozenset(
-    {"annual_report", "consolidated_financial_report"}
+    {
+        "annual_report",
+        "consolidated_financial_report",
+        "earnings_release",
+        "investor_presentation",
+        "official_press_release",
+        "official_product_document",
+        "sustainability_report",
+    }
 )
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _SOURCE_ID_HASH_LENGTH = 16
@@ -57,6 +70,11 @@ class CompetitorDocumentMetadata:
                 f"ticker does not match company_id {company_id!r}; "
                 f"expected {expected_ticker!r}."
             )
+        company_name = _required_text("company_name", self.company_name)
+        if company_name != COMPANY_NAMES[company_id]:
+            raise CompetitorMetadataError(
+                f"company_name does not match company_id {company_id!r}."
+            )
         if isinstance(self.fiscal_year, bool) or self.fiscal_year not in ALLOWED_FISCAL_YEARS:
             raise CompetitorMetadataError("fiscal_year must be 2024 or 2025.")
         period = _required_text("period", self.period).upper()
@@ -86,7 +104,7 @@ class CompetitorDocumentMetadata:
             )
 
         object.__setattr__(self, "company_id", company_id)
-        object.__setattr__(self, "company_name", _required_text("company_name", self.company_name))
+        object.__setattr__(self, "company_name", company_name)
         object.__setattr__(self, "ticker", ticker)
         object.__setattr__(self, "period", period)
         object.__setattr__(self, "document_type", document_type)

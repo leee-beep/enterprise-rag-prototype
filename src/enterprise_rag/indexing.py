@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import tempfile
@@ -13,6 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from enterprise_rag.chunking import split_documents
+from enterprise_rag.competitor_metadata import (
+    ALLOWED_DOCUMENT_TYPES,
+    ALLOWED_FISCAL_YEARS,
+    ALLOWED_PERIODS,
+    COMPANY_NAMES,
+    COMPANY_TICKERS,
+    make_source_document_id,
+)
 from enterprise_rag.config import Settings
 from enterprise_rag.documents import DocumentLoadingError, load_documents
 from enterprise_rag.embeddings import EmbeddingClient, embed_chunks
@@ -25,6 +34,7 @@ from enterprise_rag.vector_store import (
 
 INDEX_MANIFEST_FILE_NAME = "index_manifest.json"
 INDEX_MANIFEST_SCHEMA_VERSION = 1
+COMPETITOR_CORPUS_MANIFEST_SCHEMA_VERSION = 2
 
 
 class IndexingError(RuntimeError):
@@ -262,11 +272,16 @@ def _validate_manifest(value: object, path: Path) -> dict[str, Any]:
         "document_count",
         "chunk_count",
     )
-    if value.get("schema_version") != INDEX_MANIFEST_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        INDEX_MANIFEST_SCHEMA_VERSION,
+        COMPETITOR_CORPUS_MANIFEST_SCHEMA_VERSION,
+    }:
         raise IndexingError(
             "Index manifest schema is incompatible: "
-            f"expected {INDEX_MANIFEST_SCHEMA_VERSION}, "
-            f"received {value.get('schema_version')!r}."
+            f"expected {INDEX_MANIFEST_SCHEMA_VERSION} or "
+            f"{COMPETITOR_CORPUS_MANIFEST_SCHEMA_VERSION}, "
+            f"received {schema_version!r}."
         )
     for name in required_strings:
         if not isinstance(value.get(name), str) or not value[name].strip():
@@ -290,7 +305,131 @@ def _validate_manifest(value: object, path: Path) -> dict[str, Any]:
         raise IndexingError(
             "Index manifest chunk_overlap must be smaller than chunk_size."
         )
+    if schema_version == COMPETITOR_CORPUS_MANIFEST_SCHEMA_VERSION:
+        _validate_competitor_corpus_manifest(value)
     return value
+
+
+def _validate_competitor_corpus_manifest(value: dict[str, Any]) -> None:
+    company_id = value.get("company_id")
+    if company_id not in COMPANY_TICKERS:
+        raise IndexingError("Competitor corpus manifest company_id is unsupported.")
+    if value.get("company_name") != COMPANY_NAMES[company_id]:
+        raise IndexingError("Competitor corpus manifest company_name is incompatible.")
+    if value.get("ticker") != COMPANY_TICKERS[company_id]:
+        raise IndexingError("Competitor corpus manifest ticker is incompatible.")
+    source_count = value.get("source_count")
+    sources = value.get("source_documents")
+    if (
+        isinstance(source_count, bool)
+        or not isinstance(source_count, int)
+        or source_count < 1
+        or not isinstance(sources, list)
+        or len(sources) != source_count
+    ):
+        raise IndexingError(
+            "Competitor corpus manifest source_documents must match source_count."
+        )
+    required = {
+        "source_document_id",
+        "source_sha256",
+        "title",
+        "document_type",
+        "fiscal_year",
+        "period",
+        "page_count",
+        "loaded_document_count",
+    }
+    normalized: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    fingerprints: set[str] = set()
+    for position, source in enumerate(sources):
+        if not isinstance(source, dict) or set(source) != required:
+            raise IndexingError(
+                f"Competitor corpus source {position} has an invalid schema."
+            )
+        for name in (
+            "source_document_id",
+            "source_sha256",
+            "title",
+            "document_type",
+            "period",
+        ):
+            if not isinstance(source.get(name), str) or not source[name].strip():
+                raise IndexingError(
+                    f"Competitor corpus source {position} field {name!r} is invalid."
+                )
+        digest = source["source_sha256"]
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise IndexingError(
+                f"Competitor corpus source {position} has an invalid fingerprint."
+            )
+        for name in ("page_count", "loaded_document_count"):
+            field = source.get(name)
+            if isinstance(field, bool) or not isinstance(field, int) or field < 1:
+                raise IndexingError(
+                    f"Competitor corpus source {position} field {name!r} must be positive."
+                )
+        fiscal_year = source["fiscal_year"]
+        if isinstance(fiscal_year, bool) or fiscal_year not in ALLOWED_FISCAL_YEARS:
+            raise IndexingError(
+                f"Competitor corpus source {position} fiscal_year is unsupported."
+            )
+        document_type = source["document_type"]
+        if document_type not in ALLOWED_DOCUMENT_TYPES:
+            raise IndexingError(
+                f"Competitor corpus source {position} document_type is unsupported."
+            )
+        period = source["period"]
+        if period not in ALLOWED_PERIODS:
+            raise IndexingError(
+                f"Competitor corpus source {position} period is unsupported."
+            )
+        identity = source["source_document_id"]
+        if identity in identities or digest in fingerprints:
+            raise IndexingError("Competitor corpus manifest contains duplicate sources.")
+        expected_identity = make_source_document_id(
+            company_id, document_type, fiscal_year, digest
+        )
+        if identity != expected_identity:
+            raise IndexingError(
+                "Competitor corpus source identity is noncanonical or incompatible."
+            )
+        identities.add(identity)
+        fingerprints.add(digest)
+        normalized.append(source)
+    if sources != sorted(sources, key=lambda item: item["source_document_id"]):
+        raise IndexingError("Competitor corpus sources must use deterministic identity order.")
+    if sum(source["loaded_document_count"] for source in sources) != value["document_count"]:
+        raise IndexingError(
+            "Competitor corpus loaded-document count does not match its sources."
+        )
+    if sum(source["page_count"] for source in sources) != value.get("page_count"):
+        raise IndexingError("Competitor corpus page count does not match its sources.")
+    expected_fingerprint = corpus_fingerprint(normalized)
+    if value.get("corpus_fingerprint") != expected_fingerprint:
+        raise IndexingError("Competitor corpus manifest fingerprint is stale or invalid.")
+    if value.get("source_identifier") != (
+        f"competitor-corpus:{company_id}:{expected_fingerprint[:16]}"
+    ):
+        raise IndexingError("Competitor corpus source_identifier is stale or invalid.")
+    expected_years = sorted({source["fiscal_year"] for source in sources})
+    expected_types = sorted({source["document_type"] for source in sources})
+    if value.get("fiscal_years") != expected_years:
+        raise IndexingError("Competitor corpus fiscal_years do not match its sources.")
+    if value.get("document_types") != expected_types:
+        raise IndexingError("Competitor corpus document_types do not match its sources.")
+
+
+def corpus_fingerprint(source_documents: list[dict[str, Any]]) -> str:
+    """Return a deterministic internal fingerprint for canonical source metadata."""
+    canonical = json.dumps(
+        source_documents,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _publish_index(

@@ -18,6 +18,14 @@ COMPANIES = (
     ("msi", "MSI", "2377"),
 )
 
+EXTENDED_DOCUMENT_TYPES = (
+    "earnings_release",
+    "investor_presentation",
+    "official_press_release",
+    "official_product_document",
+    "sustainability_report",
+)
+
 
 def metadata_for(
     path: Path,
@@ -92,6 +100,19 @@ def test_invalid_document_type_is_rejected(tmp_path: Path) -> None:
     source.write_bytes(b"bytes")
     with pytest.raises(CompetitorMetadataError, match="document_type"):
         metadata_for(source, document_type="presentation")
+
+
+@pytest.mark.parametrize("document_type", EXTENDED_DOCUMENT_TYPES)
+def test_controlled_official_document_types_are_accepted(
+    tmp_path: Path, document_type: str
+) -> None:
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"synthetic-official-source")
+
+    metadata = metadata_for(source, document_type=document_type)
+
+    assert metadata.document_type == document_type
+    assert f":{document_type}:" in metadata.source_document_id
 
 
 def test_source_identity_is_stable_and_changes_with_file_bytes(tmp_path: Path) -> None:

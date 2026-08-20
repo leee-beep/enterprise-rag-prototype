@@ -7,19 +7,24 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from enterprise_rag.competitor_metadata import COMPANY_NAMES
 from enterprise_rag.config import Settings
 from enterprise_rag.competitor_query_expansion import CompetitorQueryExpander
 from enterprise_rag.competitor_semantic_reranking import (
     LightweightSemanticReranker,
     assess_topic_relevance_gate,
 )
-from enterprise_rag.indexing import IndexingError, validate_index_compatibility
+from enterprise_rag.indexing import (
+    COMPETITOR_CORPUS_MANIFEST_SCHEMA_VERSION,
+    IndexingError,
+    load_index_manifest,
+    validate_index_compatibility,
+)
 from enterprise_rag.models import RetrievalResult
 from enterprise_rag.retrieval import QueryEmbeddingClient, RetrievalError, Retriever
 from enterprise_rag.vector_store import FaissVectorStore, VectorStoreError
 
 
-COMPANY_NAMES = {"gigabyte": "Gigabyte", "asus": "ASUS", "msi": "MSI"}
 CANDIDATES_PER_QUERY = 12
 MIN_QUALITY_SCORE = 0.45
 ADJACENT_OVERLAP_THRESHOLD = 0.45
@@ -189,6 +194,77 @@ def _is_duplicate(candidate: RetrievalResult, selected: Sequence[CompetitorRetri
     return False
 
 
+def _validate_competitor_corpus_items(
+    company_id: str,
+    manifest: dict[str, object] | None,
+    store: FaissVectorStore,
+) -> None:
+    """Verify v2 corpus metadata without exposing private persisted content."""
+    if (
+        manifest is None
+        or manifest.get("schema_version")
+        != COMPETITOR_CORPUS_MANIFEST_SCHEMA_VERSION
+    ):
+        return
+    if manifest.get("company_id") != company_id:
+        raise IndexingError("Competitor corpus manifest company is incompatible.")
+    if manifest.get("chunk_count") != store.size:
+        raise IndexingError("Competitor corpus chunk count is stale or incompatible.")
+    raw_sources = manifest.get("source_documents")
+    if not isinstance(raw_sources, list):
+        raise IndexingError("Competitor corpus source metadata is unavailable.")
+    sources = {
+        source["source_document_id"]: source
+        for source in raw_sources
+        if isinstance(source, dict)
+        and isinstance(source.get("source_document_id"), str)
+    }
+    seen: set[str] = set()
+    for embedded in store.items:
+        metadata = embedded.chunk.metadata
+        source_id = metadata.get("source_document_id")
+        source = sources.get(source_id) if isinstance(source_id, str) else None
+        if source is None:
+            raise IndexingError(
+                "Persisted competitor chunk references an unknown source document."
+            )
+        expected = {
+            "company_id": company_id,
+            "company_name": manifest["company_name"],
+            "ticker": manifest["ticker"],
+            "source_document_id": source_id,
+            "source_sha256": source["source_sha256"],
+            "title": source["title"],
+            "document_type": source["document_type"],
+            "fiscal_year": source["fiscal_year"],
+            "period": source["period"],
+        }
+        if any(metadata.get(name) != value for name, value in expected.items()):
+            raise IndexingError(
+                "Persisted competitor chunk provenance is stale or incompatible."
+            )
+        page_number = metadata.get("page_number")
+        source_page_count = source["page_count"]
+        if (
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or page_number < 1
+            or page_number > source_page_count
+        ):
+            raise IndexingError(
+                "Persisted competitor chunk page provenance is invalid."
+            )
+        if metadata.get("page_count") != source_page_count:
+            raise IndexingError(
+                "Persisted competitor chunk page count is stale or incompatible."
+            )
+        seen.add(source_id)
+    if seen != set(sources):
+        raise IndexingError(
+            "Competitor corpus contains a source with no persisted chunks."
+        )
+
+
 class BalancedCompetitorRetriever:
     """Select usable evidence independently from each requested company."""
 
@@ -213,7 +289,11 @@ class BalancedCompetitorRetriever:
                 continue
             try:
                 validate_index_compatibility(directory, settings)
-                retrievers[company] = Retriever(embedding_client, FaissVectorStore.load(directory))
+                store = FaissVectorStore.load(directory)
+                _validate_competitor_corpus_items(
+                    company, load_index_manifest(directory), store
+                )
+                retrievers[company] = Retriever(embedding_client, store)
             except (IndexingError, VectorStoreError) as exc:
                 raise RetrievalError(f"Company index is invalid or incompatible for {company}.") from exc
         return cls(retrievers)

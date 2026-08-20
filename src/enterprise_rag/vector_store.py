@@ -68,6 +68,11 @@ class FaissVectorStore:
         """Return the common embedding-vector dimension."""
         return self._dimension
 
+    @property
+    def items(self) -> tuple[EmbeddedChunk, ...]:
+        """Return the immutable persisted item mapping in index order."""
+        return self._items
+
     def _validate_query(self, query_vector: Sequence[float], top_k: int) -> None:
         if top_k < 1:
             raise VectorStoreValidationError("top_k must be greater than or equal to 1.")
