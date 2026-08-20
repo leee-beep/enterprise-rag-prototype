@@ -5,7 +5,9 @@ import { AppShell } from "@/components/layout/app-shell";
 import { ResearchWorkspace } from "@/components/research/research-workspace";
 import { ApiClientError, competitorApi } from "@/lib/api";
 import { mapAnalyzeResponse } from "@/lib/mappers";
-import { companies, previewPrompts, topics } from "@/lib/mock-data";
+import { companies } from "@/lib/mock-data";
+import { localizedPrompts, localizedTopics } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n-context";
 import { useSessionHistory } from "@/hooks/use-session-history";
 import type { UiBackendStatus, UiOperationState } from "@/types/api";
 import type { WorkspaceResultViewModel } from "@/types/presentation";
@@ -13,6 +15,7 @@ import type { WorkspaceResultViewModel } from "@/types/presentation";
 interface RequestMeta { completedAt: string; durationSeconds: number; }
 
 export default function WorkspaceClient() {
+  const { locale } = useI18n();
   const [query, setQuery] = useState("");
   const [selectedCompanies, setSelectedCompanies] = useState(["asus", "gigabyte", "msi"]);
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
@@ -77,8 +80,8 @@ export default function WorkspaceClient() {
   const selectedContext = companies.filter((company) => selectedCompanies.includes(company.id)).map((company) => company.name).join(" · ");
 
   return (
-    <AppShell status={backendStatus} companies={companies} topics={topics} selectedCompanies={selectedCompanies} history={history} evidence={result?.evidence ?? []} selectedEvidenceId={selectedEvidenceId} menuOpen={menuOpen} evidenceOpen={evidenceOpen} onRetryReadiness={checkReadiness} onMenu={() => setMenuOpen(true)} onEvidence={() => setEvidenceOpen(true)} onCloseDrawers={closeDrawers} onClearHistory={clearHistory} onCompany={selectCompany} onTopic={(value) => { setQuery(value); closeDrawers(); }} onSelectEvidence={selectEvidence}>
-      <ResearchWorkspace query={query} context={selectedContext} operation={operation} result={result} requestMeta={requestMeta} prompts={previewPrompts} onQuery={setQuery} onAnalyze={analyze} onEvidence={selectEvidence} />
+    <AppShell status={backendStatus} companies={companies} topics={localizedTopics[locale]} selectedCompanies={selectedCompanies} history={history} evidence={result?.evidence ?? []} selectedEvidenceId={selectedEvidenceId} menuOpen={menuOpen} evidenceOpen={evidenceOpen} onRetryReadiness={checkReadiness} onMenu={() => setMenuOpen(true)} onEvidence={() => setEvidenceOpen(true)} onCloseDrawers={closeDrawers} onClearHistory={clearHistory} onCompany={selectCompany} onTopic={(value) => { setQuery(value); closeDrawers(); }} onSelectEvidence={selectEvidence}>
+      <ResearchWorkspace query={query} context={selectedContext} operation={operation} result={result} requestMeta={requestMeta} prompts={localizedPrompts[locale]} onQuery={setQuery} onAnalyze={analyze} onEvidence={selectEvidence} />
     </AppShell>
   );
 }

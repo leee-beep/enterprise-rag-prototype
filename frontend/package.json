@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "typecheck": "tsc --noEmit",
+    "test:i18n": "node --test --experimental-strip-types tests/i18n.test.ts",
     "start": "next start",
     "lint": "eslint"
   },

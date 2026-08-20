@@ -1,14 +1,11 @@
 import type { DomainStatus } from "@/types/api";
+import { useI18n } from "@/lib/i18n-context";
 
-const copy: Record<DomainStatus, { label: string; detail: string }> = {
-  completed: { label: "Completed", detail: "Grounded analysis is ready for review." },
-  partial: { label: "Partial coverage", detail: "The available result is usable, with evidence limitations noted below." },
-  ambiguous: { label: "Needs refinement", detail: "Make the company, year, or analysis goal more specific." },
-  unsupported: { label: "Outside scope", detail: "This request is outside the workspace's current analysis capabilities." },
-  insufficient: { label: "Insufficient evidence", detail: "There is not enough trusted evidence for a grounded conclusion." },
-};
-
-export function DomainState({ status }: { status: DomainStatus }) {
+export function DomainState({ status, compact = false }: { status: DomainStatus; compact?: boolean }) {
+  const { t } = useI18n();
+  const copy: Record<DomainStatus, { label: string; detail: string }> = {
+    completed: { label: t("completed"), detail: t("completedDetail") }, partial: { label: t("partial"), detail: t("partialDetail") }, ambiguous: { label: t("ambiguous"), detail: t("ambiguousDetail") }, unsupported: { label: t("unsupported"), detail: t("unsupportedDetail") }, insufficient: { label: t("insufficient"), detail: t("insufficientDetail") },
+  };
   const state = copy[status];
-  return <div className={`domain-state domain-${status}`} role="status"><span className="state-mark" aria-hidden="true" /><div><strong>{state.label}</strong><span>{state.detail}</span></div></div>;
+  return <div className={`domain-state domain-${status} ${compact ? "domain-compact" : ""}`} role="status"><span className="state-mark" aria-hidden="true" /><div><strong>{state.label}</strong>{!compact && <span>{state.detail}</span>}</div></div>;
 }

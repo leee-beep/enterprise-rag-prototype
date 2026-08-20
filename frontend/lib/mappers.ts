@@ -38,5 +38,14 @@ export function mapAnalyzeResponse(response: CompetitorAnalyzeResponse): Workspa
     evidence: response.citations.map(mapCitation),
     financialItems: response.financial_claims.map(mapFinancialClaim),
     generation: response.generation,
+    comparison: response.comparison ? {
+      requestedCompanies: [...response.comparison.requested_companies],
+      coveredCompanies: [...response.comparison.covered_companies],
+      missingCompanies: [...response.comparison.missing_companies],
+      companyProfiles: response.comparison.company_profiles.map((item) => ({ companyId: item.company_id, summary: item.summary, evidenceIds: [...item.evidence_ids] })),
+      dimensions: response.comparison.comparison_dimensions.map((item) => ({ label: item.label, observations: item.observations.map((observation) => ({ companyId: observation.company_id, text: observation.text, evidenceIds: [...observation.evidence_ids] })) })),
+      keyTakeaway: response.comparison.key_takeaway ? { text: response.comparison.key_takeaway.text, evidenceIds: [...response.comparison.key_takeaway.evidence_ids] } : null,
+    } : null,
+    responseLanguage: response.response_language,
   };
 }

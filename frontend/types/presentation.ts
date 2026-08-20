@@ -37,6 +37,15 @@ export interface FinancialDisplayItem {
   rankLabel: string | null;
 }
 
+export interface StructuredComparisonViewModel {
+  requestedCompanies: string[];
+  coveredCompanies: string[];
+  missingCompanies: string[];
+  companyProfiles: Array<{ companyId: string; summary: string; evidenceIds: string[] }>;
+  dimensions: Array<{ label: string; observations: Array<{ companyId: string; text: string; evidenceIds: string[] }> }>;
+  keyTakeaway: { text: string; evidenceIds: string[] } | null;
+}
+
 export interface WorkspaceResultViewModel {
   question: string;
   status: import("./api").DomainStatus;
@@ -45,6 +54,8 @@ export interface WorkspaceResultViewModel {
   evidence: EvidenceViewModel[];
   financialItems: FinancialDisplayItem[];
   generation: { provider: string | null; model: string | null } | null;
+  comparison: StructuredComparisonViewModel | null;
+  responseLanguage: "zh-TW" | "en" | null;
 }
 
 // Numeric values are permitted only for the isolated synthetic preview chart.

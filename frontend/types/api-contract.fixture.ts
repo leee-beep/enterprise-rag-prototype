@@ -56,6 +56,8 @@ const nullableResponse = {
     },
   ],
   generation: nullableGeneration,
+  comparison: null,
+  response_language: null,
 } satisfies CompetitorAnalyzeResponse;
 
 void nullableResponse;

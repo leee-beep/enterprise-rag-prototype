@@ -61,6 +61,19 @@ export interface GenerationMetadata {
   model: string | null;
 }
 
+export interface CompanyStrategyProfileResponse { company_id: string; summary: string; evidence_ids: string[]; }
+export interface CompanyObservationResponse { company_id: string; text: string; evidence_ids: string[]; }
+export interface ComparisonDimensionResponse { label: string; observations: CompanyObservationResponse[]; }
+export interface GroundedKeyTakeawayResponse { text: string; evidence_ids: string[]; }
+export interface StructuredComparisonResponse {
+  requested_companies: string[];
+  covered_companies: string[];
+  missing_companies: string[];
+  company_profiles: CompanyStrategyProfileResponse[];
+  comparison_dimensions: ComparisonDimensionResponse[];
+  key_takeaway: GroundedKeyTakeawayResponse | null;
+}
+
 export interface CompetitorAnalyzeResponse {
   question: string;
   status: DomainStatus;
@@ -69,6 +82,8 @@ export interface CompetitorAnalyzeResponse {
   citations: Citation[];
   financial_claims: FinancialClaim[];
   generation: GenerationMetadata | null;
+  comparison: StructuredComparisonResponse | null;
+  response_language: "zh-TW" | "en" | null;
 }
 
 export interface ApiErrorDetail {
