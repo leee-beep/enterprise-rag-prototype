@@ -21,6 +21,12 @@ class SemanticRelevanceAssessment:
     reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class TopicRelevanceGate:
+    passed: bool
+    reason: str
+
+
 class SemanticCandidate(Protocol):
     original_candidate_rank: int
     quality_score: float
@@ -55,6 +61,25 @@ def assess_semantic_relevance(question: str, text: str) -> SemanticRelevanceAsse
     reasons = tuple([f"concept:{name}" for name in matched] + (["direct-phrase"] if direct else []))
     return SemanticRelevanceAssessment(
         round(score, 6), intent, matched, direct, reasons or ("no-controlled-concept-match",)
+    )
+
+
+def assess_topic_relevance_gate(
+    assessment: SemanticRelevanceAssessment,
+) -> TopicRelevanceGate:
+    """Reject clearly off-topic evidence only for narrowly recognized intents."""
+    if assessment.intent is None:
+        return TopicRelevanceGate(True, "topic-gate:not-applicable")
+    if assessment.intent != "server":
+        return TopicRelevanceGate(True, "topic-gate:passed")
+    strong = {"ai_server", "data_center", "accelerator", "ai_computing", "ecosystem"}
+    matched = set(assessment.matched_concepts)
+    passed = bool(matched & strong) or (
+        "server" in matched and "infrastructure" in matched
+    )
+    return TopicRelevanceGate(
+        passed,
+        "topic-gate:passed" if passed else "topic-irrelevant:server",
     )
 
 

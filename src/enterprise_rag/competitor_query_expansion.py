@@ -8,7 +8,7 @@ import re
 MAX_QUERIES_PER_COMPANY = 2
 
 _INTENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\b(?:ai[ -]?servers?|servers?|data[ -]?cent(?:er|re)s?|infrastructure|enterprise)\b", re.I), "server"),
+    (re.compile(r"(?:\b(?:ai[ -]?servers?|servers?|data[ -]?cent(?:er|re)s?|infrastructure|enterprise)\b|AI\s*伺服器|伺服器|資料中心|AI\s*運算)", re.I), "server"),
     (re.compile(r"\b(?:ai[ -]?pcs?|notebooks?|laptops?)\b", re.I), "ai_pc"),
     (re.compile(r"\b(?:products?|business areas?|business segments?|product portfolios?|scope of business)\b", re.I), "products"),
     (re.compile(r"\b(?:growth drivers?|growth momentum|growth engines?)\b", re.I), "growth"),
@@ -39,6 +39,9 @@ CONTROLLED_CONCEPTS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
         ("server", ("server", "servers", "伺服器")),
         ("data_center", ("data center", "data centers", "資料中心")),
         ("infrastructure", ("infrastructure", "基礎設施", "基礎方案")),
+        ("accelerator", ("accelerator", "accelerators", "gpu server", "gpu servers", "加速器")),
+        ("ai_computing", ("ai computing", "artificial intelligence computing", "ai運算", "ai 運算", "人工智慧運算")),
+        ("ecosystem", ("server ecosystem", "ai ecosystem", "伺服器生態系", "ai 生態系")),
     ),
     "ai_pc": (
         ("ai_pc", ("ai pc", "ai pcs", "人工智慧個人電腦")),

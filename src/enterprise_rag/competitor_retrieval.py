@@ -9,7 +9,10 @@ from pathlib import Path
 
 from enterprise_rag.config import Settings
 from enterprise_rag.competitor_query_expansion import CompetitorQueryExpander
-from enterprise_rag.competitor_semantic_reranking import LightweightSemanticReranker
+from enterprise_rag.competitor_semantic_reranking import (
+    LightweightSemanticReranker,
+    assess_topic_relevance_gate,
+)
 from enterprise_rag.indexing import IndexingError, validate_index_compatibility
 from enterprise_rag.models import RetrievalResult
 from enterprise_rag.retrieval import QueryEmbeddingClient, RetrievalError, Retriever
@@ -42,6 +45,7 @@ class CompetitorRetrievalResult:
     quality_reasons: tuple[str, ...]
     semantic_relevance_score: float = 0.0
     semantic_relevance_reasons: tuple[str, ...] = ()
+    topic_relevance_passed: bool = True
 
     @property
     def text(self) -> str:
@@ -239,16 +243,31 @@ class BalancedCompetitorRetriever:
                     candidate_rank, result, assessment.quality_score, assessment.reasons,
                 ))
             reranked = self._semantic_reranker.rerank(question.strip(), tuple(usable))
+            selected_items: list[CompetitorRetrievalResult] = []
+            for item, relevance in reranked:
+                gate = assess_topic_relevance_gate(relevance)
+                if not gate.passed:
+                    rejected.append((item.original_candidate_rank, (gate.reason,)))
+                    continue
+                selected_items.append(CompetitorRetrievalResult(
+                    item.company_id, item.company_name, 0,
+                    item.original_candidate_rank, item.retrieval_result,
+                    item.quality_score, item.quality_reasons,
+                    relevance.relevance_score,
+                    relevance.reasons + (gate.reason,),
+                    gate.passed,
+                ))
+                if len(selected_items) == top_k_per_company:
+                    break
             selected = tuple(
                 CompetitorRetrievalResult(
                     item.company_id, item.company_name, final_rank,
                     item.original_candidate_rank, item.retrieval_result,
                     item.quality_score, item.quality_reasons,
-                    relevance.relevance_score, relevance.reasons,
+                    item.semantic_relevance_score, item.semantic_relevance_reasons,
+                    item.topic_relevance_passed,
                 )
-                for final_rank, (item, relevance) in enumerate(
-                    reranked[:top_k_per_company], start=1
-                )
+                for final_rank, item in enumerate(selected_items, start=1)
             )
             if not candidates:
                 rejected.append((0, ("no-candidates",)))

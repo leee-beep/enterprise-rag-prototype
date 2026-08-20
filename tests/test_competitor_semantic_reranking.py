@@ -6,6 +6,7 @@ from enterprise_rag.competitor_retrieval import BalancedCompetitorRetriever
 from enterprise_rag.competitor_semantic_reranking import (
     LightweightSemanticReranker,
     assess_semantic_relevance,
+    assess_topic_relevance_gate,
 )
 from enterprise_rag.models import DocumentChunk, EmbeddedChunk, RetrievalResult
 
@@ -115,12 +116,45 @@ def service(original, expanded, *, company="msi"):
 
 
 def test_expansion_only_direct_candidate_moves_above_earlier_weak_candidate():
-    weak = retrieval(0, NARRATIVE)
+    weak = retrieval(0, "The server infrastructure platform supports enterprise customers.")
     direct = retrieval(1, DIRECT)
     group = service((weak,), (direct,)).retrieve("What does MSI say about AI servers?", ("msi",), 2).company_evidence[0]
     assert group.evidence[0].retrieval_result.embedded_chunk.chunk.chunk_id == direct.embedded_chunk.chunk.chunk_id
     assert group.evidence[0].semantic_relevance_score > group.evidence[1].semantic_relevance_score
     assert group.evidence[0].original_candidate_rank == 2
+
+
+@pytest.mark.parametrize("text", [
+    "Employee welfare and labor relations remained stable.",
+    "Directors completed corporate governance training.",
+    "The company renewed directors and officers insurance.",
+    "Customer policy and general risk management were reviewed.",
+])
+def test_server_topic_gate_rejects_governance_and_hr_narrative(text):
+    assessment = assess_semantic_relevance("Compare AI server positioning.", text)
+    assert not assess_topic_relevance_gate(assessment).passed
+
+
+@pytest.mark.parametrize("text", [
+    "AI server products support data center infrastructure.",
+    "The GPU server accelerator ecosystem supports AI computing.",
+    "The server platform and infrastructure target enterprise AI hardware.",
+])
+def test_server_topic_gate_retains_relevant_strategy_evidence(text):
+    assessment = assess_semantic_relevance("Compare AI server positioning.", text)
+    assert assess_topic_relevance_gate(assessment).passed
+
+
+def test_balanced_retrieval_records_topic_rejection_without_private_text():
+    irrelevant = retrieval(0, "Employee welfare and director training policies are described.")
+    relevant = retrieval(1, DIRECT)
+    group = service((irrelevant,), (relevant,)).retrieve(
+        "Compare AI server positioning.", ("msi",), 2
+    ).company_evidence[0]
+    assert [item.text for item in group.evidence] == [DIRECT]
+    assert group.evidence[0].topic_relevance_passed
+    assert any("topic-irrelevant:server" in reasons for _, reasons in group.rejected_reasons)
+    assert all("Employee welfare" not in reason for _, reasons in group.rejected_reasons for reason in reasons)
 
 
 def test_rejected_table_cannot_reenter_through_semantic_overlap():
