@@ -23,9 +23,14 @@ from enterprise_rag.competitor_citations import (
     RenderedSourceReference,
 )
 from enterprise_rag.competitor_grounded_synthesis import (
+    CompanyObservation,
+    ComparisonDimension,
+    CompanyStrategyProfile,
+    GroundedKeyTakeaway,
     GroundedGenerationError,
     GroundedSynthesisError,
     ValidatedFinancialClaim,
+    StructuredComparison,
 )
 from enterprise_rag.competitor_orchestration import (
     CompetitorIntelligenceResult,
@@ -95,6 +100,37 @@ class FinancialClaimResponse(APIModel):
     rank: int | None
 
 
+class CompanyStrategyProfileResponse(APIModel):
+    company_id: str
+    summary: str
+    evidence_ids: tuple[str, ...]
+
+
+class CompanyObservationResponse(APIModel):
+    company_id: str
+    text: str
+    evidence_ids: tuple[str, ...]
+
+
+class ComparisonDimensionResponse(APIModel):
+    label: str
+    observations: tuple[CompanyObservationResponse, ...]
+
+
+class GroundedKeyTakeawayResponse(APIModel):
+    text: str
+    evidence_ids: tuple[str, ...]
+
+
+class StructuredComparisonResponse(APIModel):
+    requested_companies: tuple[str, ...]
+    covered_companies: tuple[str, ...]
+    missing_companies: tuple[str, ...]
+    company_profiles: tuple[CompanyStrategyProfileResponse, ...]
+    comparison_dimensions: tuple[ComparisonDimensionResponse, ...]
+    key_takeaway: GroundedKeyTakeawayResponse | None
+
+
 class CompetitorAnalyzeResponse(APIModel):
     question: str
     status: APIStatus
@@ -103,6 +139,8 @@ class CompetitorAnalyzeResponse(APIModel):
     citations: tuple[CitationResponse, ...]
     financial_claims: tuple[FinancialClaimResponse, ...]
     generation: GenerationMetadataResponse | None
+    comparison: StructuredComparisonResponse | None = None
+    response_language: Literal["zh-TW", "en"] | None = None
 
 
 class HealthResponse(APIModel):
@@ -281,6 +319,8 @@ def _analyze_response(result: CompetitorIntelligenceResult) -> CompetitorAnalyze
             citations=(),
             financial_claims=(),
             generation=None,
+            comparison=None,
+            response_language=None,
         )
     return CompetitorAnalyzeResponse(
         question=result.question,
@@ -294,6 +334,45 @@ def _analyze_response(result: CompetitorIntelligenceResult) -> CompetitorAnalyze
         generation=GenerationMetadataResponse(
             provider=rendered.generation_provider,
             model=rendered.generation_model,
+        ),
+        comparison=_comparison_response(rendered.comparison),
+        response_language=rendered.response_language.value,
+    )
+
+
+def _comparison_response(
+    comparison: StructuredComparison | None,
+) -> StructuredComparisonResponse | None:
+    if comparison is None:
+        return None
+    return StructuredComparisonResponse(
+        requested_companies=comparison.requested_companies,
+        covered_companies=comparison.covered_companies,
+        missing_companies=comparison.missing_companies,
+        company_profiles=tuple(
+            CompanyStrategyProfileResponse(
+                company_id=item.company_id,
+                summary=item.summary,
+                evidence_ids=item.evidence_ids,
+            ) for item in comparison.company_profiles
+        ),
+        comparison_dimensions=tuple(
+            ComparisonDimensionResponse(
+                label=item.label,
+                observations=tuple(
+                    CompanyObservationResponse(
+                        company_id=observation.company_id,
+                        text=observation.text,
+                        evidence_ids=observation.evidence_ids,
+                    ) for observation in item.observations
+                ),
+            ) for item in comparison.comparison_dimensions
+        ),
+        key_takeaway=(
+            GroundedKeyTakeawayResponse(
+                text=comparison.key_takeaway.text,
+                evidence_ids=comparison.key_takeaway.evidence_ids,
+            ) if comparison.key_takeaway else None
         ),
     )
 

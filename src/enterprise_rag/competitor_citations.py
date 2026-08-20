@@ -21,6 +21,8 @@ from enterprise_rag.competitor_grounded_synthesis import (
     GroundedSynthesisResult,
     GroundedSynthesisStatus,
     ValidatedFinancialClaim,
+    ResponseLanguage,
+    StructuredComparison,
 )
 
 
@@ -134,6 +136,8 @@ class RenderedCompetitorAnswer:
     financial_claims: tuple[ValidatedFinancialClaim, ...]
     generation_provider: str | None
     generation_model: str | None
+    comparison: StructuredComparison | None = None
+    response_language: ResponseLanguage = ResponseLanguage.EN
 
     def render_text(self) -> str:
         """Render deterministic, concise human-facing answer and provenance text."""
@@ -193,6 +197,8 @@ def render_competitor_answer(
         result.financial_claims,
         result.generation_provider,
         result.generation_model,
+        result.comparison,
+        result.response_language,
     )
 
 

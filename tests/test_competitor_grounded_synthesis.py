@@ -22,6 +22,7 @@ from enterprise_rag.competitor_grounded_synthesis import (
     GroundedSynthesisStatus,
     FINANCIAL_RESPONSE_SCHEMA,
     QualitativeCoverage,
+    ResponseLanguage,
     UnknownEvidenceCitationError,
     build_grounded_synthesis_prompt,
 )
@@ -165,6 +166,20 @@ def qualitative(company_id: str = "asus") -> CitationReadyEvidence:
     )
 
 
+def comparison_response(*companies: str) -> str:
+    profiles = {}
+    observations = {}
+    for index, company in enumerate(companies, start=1):
+        evidence_id = f"E{index}"
+        profiles[company] = {"summary": f"{company} strategy.", "evidence_ids": [evidence_id]}
+        observations[company] = {"text": f"{company} positioning.", "evidence_ids": [evidence_id]}
+    return json.dumps({
+        "text": "Supported comparison.",
+        "company_profiles": profiles,
+        "comparison_dimensions": [{"label": "Positioning", "observations": observations}],
+    })
+
+
 def fact(
     company_id: str = "asus",
     year: int = 2025,
@@ -232,7 +247,7 @@ def test_qualitative_only_grounded_synthesis() -> None:
 
 def test_python_owns_complete_qualitative_coverage_and_scope_citations() -> None:
     plan = DeterministicQuestionRouter().plan("Compare ASUS and MSI AI strategies.")
-    client = FakeStructuredGenerationClient(json.dumps({"text": "Supported comparison."}))
+    client = FakeStructuredGenerationClient(comparison_response("asus", "msi"))
     result = GroundedCompetitorSynthesizer(client).synthesize(
         plan.question, unified(qualitative("asus"), qualitative("msi")), plan
     )
@@ -240,6 +255,113 @@ def test_python_owns_complete_qualitative_coverage_and_scope_citations() -> None
     assert result.missing_qualitative_companies == ()
     assert result.cited_evidence_ids == ("E1", "E2")
     assert len(client.prompts) == 1
+    assert result.comparison is not None
+    assert result.comparison.covered_companies == ("asus", "msi")
+
+
+def test_three_company_comparison_and_response_languages_are_deterministic() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS, Gigabyte, and MSI AI strategies.")
+    client = FakeStructuredGenerationClient(comparison_response("asus", "gigabyte", "msi"))
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        plan.question,
+        unified(qualitative("asus"), qualitative("gigabyte"), qualitative("msi")),
+        plan,
+    )
+    assert result.comparison is not None and len(result.comparison.company_profiles) == 3
+    assert result.response_language is ResponseLanguage.EN
+    assert "Write all generated prose in English." in client.prompts[0]
+    assert GroundedCompetitorSynthesizer(FakeGenerationClient(json.dumps({"text": "摘要"}))).synthesize(
+        "請說明 ASUS 的 AI 策略。", unified(qualitative("asus"))
+    ).response_language is ResponseLanguage.ZH_TW
+
+
+def test_comparison_schema_uses_exact_company_slots_and_company_evidence_enums() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS, Gigabyte, and MSI AI strategies.")
+    client = FakeStructuredGenerationClient(comparison_response("asus", "gigabyte", "msi"))
+    result = GroundedCompetitorSynthesizer(client).synthesize(
+        plan.question,
+        unified(qualitative("asus"), qualitative("gigabyte"), qualitative("msi")),
+        plan,
+    )
+
+    schema = client.schemas[0]
+    profiles = schema["properties"]["company_profiles"]
+    assert profiles["required"] == list(plan.requested_companies)
+    assert profiles["additionalProperties"] is False
+    assert profiles["properties"]["asus"]["properties"]["evidence_ids"]["items"]["enum"] == ["E1"]
+    assert profiles["properties"]["gigabyte"]["properties"]["evidence_ids"]["items"]["enum"] == ["E2"]
+    dimensions = schema["properties"]["comparison_dimensions"]
+    assert dimensions["minItems"] == dimensions["maxItems"] == 1
+    observations = dimensions["items"]["properties"]["observations"]
+    assert observations["required"] == list(plan.requested_companies)
+    assert observations["additionalProperties"] is False
+    assert result.comparison is not None
+    assert tuple(item.company_id for item in result.comparison.company_profiles) == plan.requested_companies
+
+
+def test_partial_comparison_schema_omits_missing_company_slots() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS, Gigabyte, and MSI AI strategies.")
+    client = FakeStructuredGenerationClient(comparison_response("asus", "gigabyte"))
+    GroundedCompetitorSynthesizer(client).synthesize(
+        plan.question, unified(qualitative("asus"), qualitative("gigabyte")), plan
+    )
+    schema = client.schemas[0]
+    profiles = schema["properties"]["company_profiles"]
+    observations = schema["properties"]["comparison_dimensions"]["items"]["properties"]["observations"]
+    expected_covered = [company for company in plan.requested_companies if company != "msi"]
+    assert profiles["required"] == expected_covered
+    assert set(profiles["properties"]) == {"asus", "gigabyte"}
+    assert observations["required"] == expected_covered
+    assert "msi" not in observations["properties"]
+
+
+def test_comparison_rejects_cross_company_and_unknown_evidence_bindings() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS and MSI AI strategies.")
+    payload = json.loads(comparison_response("asus", "msi"))
+    payload["company_profiles"]["asus"]["evidence_ids"] = ["E2"]
+    with pytest.raises(UnknownEvidenceCitationError, match="another company"):
+        GroundedCompetitorSynthesizer(FakeStructuredGenerationClient(json.dumps(payload))).synthesize(
+            plan.question, unified(qualitative("asus"), qualitative("msi")), plan
+        )
+
+
+def test_comparison_rejects_financial_evidence_id() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS and MSI 2025 revenue and AI strategies.")
+    evidence = unified(qualitative("asus"), qualitative("msi"), fact("asus"))
+    financial_id = next(
+        item.evidence_id for item in evidence if item.evidence_type.value == "financial_fact"
+    )
+    payload = json.loads(comparison_response("asus", "msi"))
+    payload["company_profiles"]["asus"]["evidence_ids"] = [financial_id]
+    client = SequenceStructuredGenerationClient([
+        json.dumps(payload),
+        json.dumps({"claims": []}),
+    ])
+    with pytest.raises(UnknownEvidenceCitationError, match="unknown evidence"):
+        GroundedCompetitorSynthesizer(client).synthesize(
+            plan.question,
+            evidence,
+            plan,
+        )
+    payload = json.loads(comparison_response("asus", "msi"))
+    payload["company_profiles"]["asus"]["evidence_ids"] = ["E99"]
+    with pytest.raises(UnknownEvidenceCitationError, match="unknown evidence"):
+        GroundedCompetitorSynthesizer(FakeStructuredGenerationClient(json.dumps(payload))).synthesize(
+            plan.question, unified(qualitative("asus"), qualitative("msi")), plan
+        )
+
+
+def test_partial_coverage_is_python_owned_and_takeaway_is_omitted() -> None:
+    plan = DeterministicQuestionRouter().plan("Compare ASUS, Gigabyte, and MSI AI strategies.")
+    result = GroundedCompetitorSynthesizer(FakeStructuredGenerationClient(
+        comparison_response("asus", "gigabyte")
+    )).synthesize(
+        plan.question, unified(qualitative("asus"), qualitative("gigabyte")), plan
+    )
+    assert result.status is GroundedSynthesisStatus.PARTIAL
+    assert result.comparison is not None
+    assert result.comparison.missing_companies == ("msi",)
+    assert result.comparison.key_takeaway is None
 
 
 def test_python_owns_partial_qualitative_coverage() -> None:

@@ -23,9 +23,15 @@ from enterprise_rag.competitor_citations import (
 )
 from enterprise_rag.competitor_evidence import EvidenceType
 from enterprise_rag.competitor_grounded_synthesis import (
+    CompanyObservation,
+    CompanyStrategyProfile,
+    ComparisonDimension,
     FinancialClaimType,
     GroundedSynthesisStatus,
     ValidatedFinancialClaim,
+    GroundedKeyTakeaway,
+    ResponseLanguage,
+    StructuredComparison,
 )
 from enterprise_rag.competitor_orchestration import (
     CompetitorIntelligenceResult,
@@ -217,11 +223,30 @@ def test_completed_analysis_has_frontend_ready_safe_schema() -> None:
     assert body["citations"][0]["sources"][0]["page_number"] == 42
     assert body["citations"][1]["sources"][0]["page_number"] is None
     assert body["citations"][0]["evidence_type"] == "qualitative"
+    assert body["comparison"] is None
+    assert body["response_language"] == "en"
     serialized = response.text.casefold()
     assert "chunk_id" not in serialized
     assert "sha256" not in serialized
     assert "source_document" not in serialized
     assert "data/private" not in serialized
+
+
+def test_structured_comparison_is_exposed_without_parsing_answer_text() -> None:
+    base = completed_result()
+    comparison = StructuredComparison(
+        ("asus", "msi"), ("asus", "msi"), (),
+        (CompanyStrategyProfile("asus", "ASUS profile", ("E1",)), CompanyStrategyProfile("msi", "MSI profile", ("E3",))),
+        (ComparisonDimension("Positioning", (CompanyObservation("asus", "ASUS observation", ("E1",)), CompanyObservation("msi", "MSI observation", ("E3",)))),),
+        GroundedKeyTakeaway("Grounded takeaway", ("E1", "E3")),
+    )
+    rendered = replace(base.rendered_answer, comparison=comparison, response_language=ResponseLanguage.ZH_TW)
+    with client(FakeApplication(replace(base, rendered_answer=rendered))) as http:
+        body = http.post("/api/competitor/analyze", json={"question": base.question}).json()
+    assert body["answer_text"] == "Synthetic grounded answer."
+    assert body["response_language"] == "zh-TW"
+    assert len(body["comparison"]["company_profiles"]) == 2
+    assert body["comparison"]["key_takeaway"]["evidence_ids"] == ["E1", "E3"]
 
 
 @pytest.mark.parametrize(

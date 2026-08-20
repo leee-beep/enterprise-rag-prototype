@@ -29,8 +29,10 @@ from enterprise_rag.generation import (
 QUALITATIVE_SYNTHESIS_INSTRUCTIONS = """Write a concise competitor-analysis narrative.
 Use only the supplied qualitative evidence. Do not introduce external knowledge, cite
 evidence IDs, pages, paths, URLs, or sources, and do not characterize a company for which
-no evidence was supplied. Return exactly one JSON object with a single non-empty `text`
-field. Numeric text is permitted, but it is never authoritative financial output."""
+no evidence was supplied. Numeric text is permitted, but it is never authoritative
+financial output. For a multi-company comparison, also return grounded company_profiles
+and comparison_dimensions using only supplied evidence IDs. Python owns and validates
+company coverage and citations."""
 
 FINANCIAL_SYNTHESIS_INSTRUCTIONS = """Select structured financial claims from only the
 supplied trusted financial evidence. Do not write prose. Never calculate, recalculate,
@@ -42,6 +44,9 @@ _EVIDENCE_ID = re.compile(r"E[1-9]\d*")
 _CITATION_GROUP = re.compile(r"\[((?:E\d+\s*(?:,\s*E\d+\s*)*))\]")
 _DECIMAL_TEXT = re.compile(r"[-+]?\d+(?:\.\d+)?")
 _QUALITATIVE_RESPONSE_KEYS = frozenset({"text"})
+_COMPARISON_RESPONSE_KEYS = frozenset({
+    "text", "company_profiles", "comparison_dimensions"
+})
 _FINANCIAL_RESPONSE_KEYS = frozenset({"claims"})
 _BASIC_CLAIM_KEYS = frozenset({"evidence_id", "claim_type", "role", "value"})
 _COMPARISON_CLAIM_KEYS = _BASIC_CLAIM_KEYS | {"company_id", "rank"}
@@ -161,6 +166,47 @@ class QualitativeCoverage(str, Enum):
     COMPLETE = "complete"
 
 
+class ResponseLanguage(str, Enum):
+    ZH_TW = "zh-TW"
+    EN = "en"
+
+
+@dataclass(frozen=True)
+class CompanyStrategyProfile:
+    company_id: str
+    summary: str
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CompanyObservation:
+    company_id: str
+    text: str
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ComparisonDimension:
+    label: str
+    observations: tuple[CompanyObservation, ...]
+
+
+@dataclass(frozen=True)
+class GroundedKeyTakeaway:
+    text: str
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class StructuredComparison:
+    requested_companies: tuple[str, ...]
+    covered_companies: tuple[str, ...]
+    missing_companies: tuple[str, ...]
+    company_profiles: tuple[CompanyStrategyProfile, ...]
+    comparison_dimensions: tuple[ComparisonDimension, ...]
+    key_takeaway: GroundedKeyTakeaway | None
+
+
 class FinancialClaimType(str, Enum):
     REPORTED_FACT = "reported_fact"
     CALCULATED_METRIC = "calculated_metric"
@@ -190,6 +236,8 @@ class GroundedSynthesisResult:
     generation_model: str | None
     qualitative_coverage: QualitativeCoverage = QualitativeCoverage.NOT_REQUESTED
     missing_qualitative_companies: tuple[str, ...] = ()
+    comparison: StructuredComparison | None = None
+    response_language: ResponseLanguage = ResponseLanguage.EN
 
 
 class GroundedCompetitorSynthesizer:
@@ -210,6 +258,7 @@ class GroundedCompetitorSynthesizer:
         analysis_plan: AnalysisPlan | None = None,
     ) -> GroundedSynthesisResult:
         normalized_question = _required_text("question", question)
+        response_language = resolve_response_language(normalized_question)
         if not isinstance(evidence, UnifiedEvidenceSet):
             raise TypeError("evidence must be a UnifiedEvidenceSet.")
         if analysis_plan is not None and not isinstance(analysis_plan, AnalysisPlan):
@@ -244,10 +293,11 @@ class GroundedCompetitorSynthesizer:
             )
 
         blocks: list[str] = []
+        comparison: StructuredComparison | None = None
         cited_ids: list[str] = []
         if qualitative:
-            qualitative_text = self._generate_qualitative(
-                normalized_question, qualitative, analysis_plan
+            qualitative_text, comparison = self._generate_qualitative(
+                normalized_question, qualitative, analysis_plan, response_language
             )
             qualitative_ids = tuple(item.evidence_id for item in qualitative)
             blocks.append(qualitative_text + " [" + ", ".join(qualitative_ids) + "]")
@@ -289,6 +339,8 @@ class GroundedCompetitorSynthesizer:
             self._generation_client.model,
             coverage,
             missing,
+            comparison if qualitative else None,
+            response_language,
         )
 
     def _generate_qualitative(
@@ -296,12 +348,18 @@ class GroundedCompetitorSynthesizer:
         question: str,
         evidence: tuple[UnifiedEvidence, ...],
         plan: AnalysisPlan | None,
-    ) -> str:
+        response_language: ResponseLanguage,
+    ) -> tuple[str, StructuredComparison | None]:
+        comparison_requested = _comparison_requested(plan, evidence)
         raw = self._generate_response(
-            build_qualitative_synthesis_prompt(question, evidence, plan),
-            QUALITATIVE_RESPONSE_SCHEMA,
+            build_qualitative_synthesis_prompt(
+                question, evidence, plan, response_language=response_language,
+                comparison_requested=comparison_requested,
+            ),
+            _build_comparison_response_schema(evidence, plan)
+            if comparison_requested else QUALITATIVE_RESPONSE_SCHEMA,
         )
-        return _parse_qualitative_response(raw)
+        return _parse_qualitative_response(raw, evidence, plan, comparison_requested)
 
     def _generate_financial(
         self,
@@ -356,9 +414,25 @@ def build_qualitative_synthesis_prompt(
     question: str,
     evidence: tuple[UnifiedEvidence, ...],
     analysis_plan: AnalysisPlan | None = None,
+    *,
+    response_language: ResponseLanguage | None = None,
+    comparison_requested: bool = False,
 ) -> str:
     """Build a prose-only prompt from the exact Python-owned evidence scope."""
-    return QUALITATIVE_SYNTHESIS_INSTRUCTIONS + "\n\n" + build_grounded_synthesis_prompt(
+    language = response_language or resolve_response_language(question)
+    language_instruction = (
+        "Write all generated prose in Traditional Chinese (zh-TW)."
+        if language is ResponseLanguage.ZH_TW
+        else "Write all generated prose in English."
+    )
+    comparison_instruction = (
+        " Company profile and observation object keys are authoritative company IDs;"
+        " do not repeat company_id inside their values. Return exactly one concise"
+        " comparison dimension and the complete structured comparison fields in the"
+        " response schema."
+        if comparison_requested else " Return only the text field."
+    )
+    return QUALITATIVE_SYNTHESIS_INSTRUCTIONS + "\n" + language_instruction + comparison_instruction + "\n\n" + build_grounded_synthesis_prompt(
         question, UnifiedEvidenceSet(evidence), analysis_plan
     )
 
@@ -396,14 +470,21 @@ def _parse_json_object(raw_response: str, expected_keys: frozenset[str]) -> dict
     return payload
 
 
-def _parse_qualitative_response(raw_response: str) -> str:
-    payload = _parse_json_object(raw_response, _QUALITATIVE_RESPONSE_KEYS)
+def _parse_qualitative_response(
+    raw_response: str,
+    evidence: tuple[UnifiedEvidence, ...],
+    plan: AnalysisPlan | None,
+    comparison_requested: bool,
+) -> tuple[str, StructuredComparison | None]:
+    expected = _COMPARISON_RESPONSE_KEYS if comparison_requested else _QUALITATIVE_RESPONSE_KEYS
+    payload = _parse_json_object(raw_response, expected)
     text = _required_generated_text(payload.get("text"))
     if _CITATION_GROUP.search(text):
         raise GroundedResponseFormatError(
             "Qualitative generation must not contain evidence citation syntax."
         )
-    return text
+    comparison = _parse_structured_comparison(payload, evidence, plan) if comparison_requested else None
+    return text, comparison
 
 
 def _parse_financial_response(
@@ -755,6 +836,195 @@ def _only_insufficient_comparisons(evidence: UnifiedEvidenceSet) -> bool:
         and item.data.status == "insufficient"
         and not item.data.ranked_entries
         for item in evidence
+    )
+
+
+def resolve_response_language(question: str) -> ResponseLanguage:
+    """Resolve answer language deterministically; mixed CJK input selects zh-TW."""
+    normalized = _required_text("question", question)
+    return (
+        ResponseLanguage.ZH_TW
+        if re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", normalized)
+        else ResponseLanguage.EN
+    )
+
+
+def _comparison_requested(
+    plan: AnalysisPlan | None,
+    qualitative: tuple[UnifiedEvidence, ...],
+) -> bool:
+    if plan is None or len(plan.requested_companies) < 2:
+        return False
+    covered = {item.company_id for item in qualitative if item.company_id}
+    return len(covered) >= 2
+
+
+def _parse_evidence_ids(value: object, *, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise GroundedResponseFormatError(f"{field} must be a non-empty list.")
+    ids = tuple(value)
+    if any(not isinstance(item, str) or not _EVIDENCE_ID.fullmatch(item) for item in ids):
+        raise GroundedResponseFormatError(f"{field} contains an invalid evidence ID.")
+    if len(ids) != len(set(ids)):
+        raise GroundedResponseFormatError(f"{field} contains duplicate evidence IDs.")
+    return ids
+
+
+def _build_comparison_response_schema(
+    evidence: tuple[UnifiedEvidence, ...],
+    plan: AnalysisPlan | None,
+) -> dict[str, object]:
+    """Build the smallest keyed contract proven reliable with the local provider."""
+    if plan is None:
+        raise GroundedResponseFormatError("Structured comparison requires an analysis plan.")
+    evidence_by_company = {
+        company: tuple(
+            item.evidence_id
+            for item in evidence
+            if item.evidence_type is EvidenceType.QUALITATIVE
+            and item.company_id == company
+        )
+        for company in plan.requested_companies
+    }
+    covered = tuple(
+        company for company in plan.requested_companies if evidence_by_company[company]
+    )
+
+    def evidence_ids_schema(company: str) -> dict[str, object]:
+        ids = evidence_by_company[company]
+        return {
+            "type": "array",
+            "items": {"type": "string", "enum": list(ids)},
+            "minItems": 1,
+            "maxItems": min(2, len(ids)),
+        }
+
+    profile_properties = {
+        company: {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "maxLength": 300},
+                "evidence_ids": evidence_ids_schema(company),
+            },
+            "required": ["summary", "evidence_ids"],
+            "additionalProperties": False,
+        }
+        for company in covered
+    }
+    observation_properties = {
+        company: {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "maxLength": 300},
+                "evidence_ids": evidence_ids_schema(company),
+            },
+            "required": ["text", "evidence_ids"],
+            "additionalProperties": False,
+        }
+        for company in covered
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "maxLength": 900},
+            "company_profiles": {
+                "type": "object",
+                "properties": profile_properties,
+                "required": list(covered),
+                "additionalProperties": False,
+            },
+            "comparison_dimensions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "maxLength": 80},
+                        "observations": {
+                            "type": "object",
+                            "properties": observation_properties,
+                            "required": list(covered),
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["label", "observations"],
+                    "additionalProperties": False,
+                },
+                "minItems": 1,
+                "maxItems": 1,
+            },
+        },
+        "required": ["text", "company_profiles", "comparison_dimensions"],
+        "additionalProperties": False,
+    }
+
+
+def _validate_qualitative_binding(
+    company_id: str,
+    evidence_ids: tuple[str, ...],
+    available: dict[str, UnifiedEvidence],
+) -> None:
+    for evidence_id in evidence_ids:
+        item = available.get(evidence_id)
+        if item is None:
+            raise UnknownEvidenceCitationError("Structured comparison cites unknown evidence.")
+        if item.evidence_type is not EvidenceType.QUALITATIVE:
+            raise UnknownEvidenceCitationError("Structured comparison requires qualitative evidence.")
+        if item.company_id != company_id:
+            raise UnknownEvidenceCitationError("Structured comparison evidence belongs to another company.")
+
+
+def _parse_structured_comparison(
+    payload: dict[str, object],
+    evidence: tuple[UnifiedEvidence, ...],
+    plan: AnalysisPlan | None,
+) -> StructuredComparison:
+    if plan is None:
+        raise GroundedResponseFormatError("Structured comparison requires an analysis plan.")
+    requested = plan.requested_companies
+    available = {item.evidence_id: item for item in evidence}
+    covered = tuple(
+        company for company in requested
+        if any(item.company_id == company for item in evidence)
+    )
+    missing = tuple(company for company in requested if company not in covered)
+    raw_profiles = payload.get("company_profiles")
+    if not isinstance(raw_profiles, dict) or set(raw_profiles) != set(covered):
+        raise GroundedResponseFormatError(
+            "company_profiles must contain exactly one keyed slot per covered company."
+        )
+    profiles: list[CompanyStrategyProfile] = []
+    for company in covered:
+        raw = raw_profiles[company]
+        if not isinstance(raw, dict) or set(raw) != {"summary", "evidence_ids"}:
+            raise GroundedResponseFormatError("Company profile has an invalid schema.")
+        ids = _parse_evidence_ids(raw.get("evidence_ids"), field="company profile evidence_ids")
+        _validate_qualitative_binding(company, ids, available)
+        profiles.append(CompanyStrategyProfile(company, _required_generated_text(raw.get("summary")), ids))
+
+    raw_dimensions = payload.get("comparison_dimensions")
+    if not isinstance(raw_dimensions, list) or len(raw_dimensions) != 1:
+        raise GroundedResponseFormatError("comparison_dimensions must contain exactly one item.")
+    dimensions: list[ComparisonDimension] = []
+    for raw in raw_dimensions:
+        if not isinstance(raw, dict) or set(raw) != {"label", "observations"}:
+            raise GroundedResponseFormatError("Comparison dimension has an invalid schema.")
+        observations_raw = raw.get("observations")
+        if not isinstance(observations_raw, dict) or set(observations_raw) != set(covered):
+            raise GroundedResponseFormatError(
+                "Comparison observations must contain exactly one keyed slot per covered company."
+            )
+        observations: list[CompanyObservation] = []
+        for company in covered:
+            observation = observations_raw[company]
+            if not isinstance(observation, dict) or set(observation) != {"text", "evidence_ids"}:
+                raise GroundedResponseFormatError("Comparison observation has an invalid schema.")
+            ids = _parse_evidence_ids(observation.get("evidence_ids"), field="observation evidence_ids")
+            _validate_qualitative_binding(company, ids, available)
+            observations.append(CompanyObservation(company, _required_generated_text(observation.get("text")), ids))
+        dimensions.append(ComparisonDimension(_required_generated_text(raw.get("label")), tuple(observations)))
+
+    return StructuredComparison(
+        requested, covered, missing, tuple(profiles), tuple(dimensions), None
     )
 
 
